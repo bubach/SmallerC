@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2012-2014, Alexey Frunze
+Copyright (c) 2012-2015, Alexey Frunze
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -21,32 +21,20 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
 ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
 */
 
 /*****************************************************************************/
 /*                                                                           */
 /*                                Smaller C                                  */
 /*                                                                           */
-/*       A simple and small single-pass C compiler ("small C" class).        */
+/*                 A simple and small single-pass C compiler                 */
 /*                                                                           */
 /*                           MIPS code generator                             */
 /*                                                                           */
 /*****************************************************************************/
 
 // Works around bugs in RetroBSD's as instruction reordering
-#define REORDER_WORKAROUND
-// Works around bugs in RetroBSD's as immediate operand truncation to 16 bits
-//#define INSTR_IMM_WORKAROUND
-// Allows the -use-gp option (generally unreliable since implemented simplistically)
-//#define ALLOW_GP
-
-#ifdef ALLOW_GP
-int UseGp = 0;
-#endif
+//#define REORDER_WORKAROUND
 
 STATIC
 void GenInit(void)
@@ -54,8 +42,10 @@ void GenInit(void)
   // initialization of target-specific code generator
   SizeOfWord = 4;
   OutputFormat = FormatSegmented;
-  CodeHeader = "\t.text";
-  DataHeader = "\t.data";
+  CodeHeaderFooter[0] = "\t.text";
+  DataHeaderFooter[0] = "\t.data";
+  RoDataHeaderFooter[0] = "\t.rdata";
+  BssHeaderFooter[0] = "\t.bss";
   UseLeadingUnderscores = 0;
 #ifdef REORDER_WORKAROUND
   FileHeader = "\t.set\tnoreorder";
@@ -69,15 +59,6 @@ int GenInitParams(int argc, char** argv, int* idx)
 {
   (void)argc;
   // initialization of target-specific code generator with parameters
-#ifdef ALLOW_GP
-  if (!strcmp(argv[*idx], "-use-gp"))
-  {
-    UseGp = 1;
-    return 1;
-  }
-  else
-  // fallthrough
-#endif
   if (!strcmp(argv[*idx], "-v"))
   {
     // RetroBSD's cc may supply this parameter. Just need to consume it.
@@ -100,8 +81,9 @@ void GenStartCommentLine(void)
 }
 
 STATIC
-void GenWordAlignment(void)
+void GenWordAlignment(int bss)
 {
+  (void)bss;
   printf2("\t.align 2\n");
 }
 
@@ -109,7 +91,7 @@ STATIC
 void GenLabel(char* Label, int Static)
 {
   {
-    if (OutputFormat != FormatFlat && !Static && GenExterns)
+    if (!Static && GenExterns)
       printf2("\t.globl\t%s\n", Label);
     printf2("%s:\n", Label);
   }
@@ -139,8 +121,9 @@ void GenPrintNumLabel(int label)
 }
 
 STATIC
-void GenZeroData(unsigned Size)
+void GenZeroData(unsigned Size, int bss)
 {
+  (void)bss;
   printf2("\t.space\t%u\n", truncUint(Size)); // or ".fill size"
 }
 
@@ -176,6 +159,19 @@ void GenAddrData(int Size, char* Label, int ofs)
   if (ofs)
     printf2(" %+d", ofs);
   puts2("");
+}
+
+STATIC
+int GenFxnSizeNeeded(void)
+{
+  return 0;
+}
+
+STATIC
+void GenRecordFxnSize(char* startLabelName, int endLabelNo)
+{
+  (void)startLabelName;
+  (void)endLabelNo;
 }
 
 #define MipsInstrNop    0x00
@@ -318,7 +314,7 @@ void GenPrintInstr(int instr, int val)
 #define MipsOpConst                      0x80
 #define MipsOpLabel                      0x81
 #define MipsOpNumLabel                   0x82
-#define MipsOpLabelGpOption              0x83
+#define MipsOpLabelLo                    0x83
 #define MipsOpIndLocal                   MipsOpIndRegFp
 
 #define MAX_TEMP_REGS 8 // this many temp registers used beginning with T0 to hold subexpression results
@@ -349,22 +345,10 @@ void GenPrintOperand(int op, int val)
     switch (op)
     {
     case MipsOpConst: printf2("%d", truncInt(val)); break;
-    case MipsOpLabelGpOption:
-#ifdef ALLOW_GP
-      if (UseGp)
-      {
-        printf2("%%gp_rel(");
-        GenPrintLabel(IdentTable + val);
-        printf2(")($28)");
-      }
-      else
-      // fallthrough
-#endif
-      {
-        printf2("%%lo(");
-        GenPrintLabel(IdentTable + val);
-        printf2(")($1)");
-      }
+    case MipsOpLabelLo:
+      printf2("%%lo(");
+      GenPrintLabel(IdentTable + val);
+      printf2(")($1)");
       break;
     case MipsOpLabel: GenPrintLabel(IdentTable + val); break;
     case MipsOpNumLabel: GenPrintNumLabel(val); break;
@@ -427,61 +411,10 @@ void GenPrintInstr3Operands(int instr, int instrval,
                             int operand2, int operand2val,
                             int operand3, int operand3val)
 {
-#ifdef INSTR_IMM_WORKAROUND
-  int useAt = 0;
-#endif
-
   if (operand3 == MipsOpConst && operand3val == 0 &&
       (instr == MipsInstrAddU || instr == MipsInstrSubU) &&
       operand1 == operand2)
     return;
-
-#ifdef INSTR_IMM_WORKAROUND
-  if (operand3 == MipsOpConst)
-  {
-    unsigned imm = truncUint(operand3val);
-
-    switch (instr)
-    {
-    // signed imm16:
-    //   addi[u], subi[u], slti[u]
-    case MipsInstrAddU:
-    case MipsInstrSLT:
-    case MipsInstrSLTU:
-      if (imm > 0x7FFF && imm < 0xFFFF8000) // if not (-0x8000 <= imm <= 0x7FFF)
-        useAt = 1;
-      break;
-    case MipsInstrSubU:
-      // subi[u] will be transformed into addi[u] and the immediate will be negated,
-      // hence the immediate range is shifted by 1
-      if (imm > 0x8000 && imm < 0xFFFF8001) // if not (-0x7FFF <= imm <= 0x8000)
-        useAt = 1;
-      break;
-
-    // unsigned imm16:
-    //   andi, ori, xori
-    case MipsInstrAnd:
-    case MipsInstrOr:
-    case MipsInstrXor:
-      if (imm > 0xFFFF)
-        useAt = 1;
-      break;
-
-    // also: various trap instructions
-    default:
-      break;
-    }
-  }
-
-  if (useAt)
-  {
-    puts2("\t.set\tnoat");
-    GenPrintInstr2Operands(MipsInstrLI, 0,
-                           MipsOpRegAt, 0,
-                           MipsOpConst, operand3val);
-    operand3 = MipsOpRegAt;
-  }
-#endif
 
   GenPrintInstr(instr, instrval);
   GenPrintOperand(operand1, operand1val);
@@ -490,13 +423,6 @@ void GenPrintInstr3Operands(int instr, int instrval,
   GenPrintOperandSeparator();
   GenPrintOperand(operand3, operand3val);
   GenPrintNewLine();
-
-#ifdef INSTR_IMM_WORKAROUND
-  if (useAt)
-  {
-    puts2("\t.set\tat");
-  }
-#endif
 
 #ifdef REORDER_WORKAROUND
   if (instr == MipsInstrBEQ || instr == MipsInstrBNE)
@@ -566,7 +492,6 @@ void GenJumpUncond(int label)
 
 extern int GenWreg; // GenWreg is defined below
 
-#ifndef USE_SWITCH_TAB
 STATIC
 void GenJumpIfEqual(int val, int label)
 {
@@ -578,7 +503,6 @@ void GenJumpIfEqual(int val, int label)
                          TEMP_REG_B, 0,
                          MipsOpNumLabel, label);
 }
-#endif
 
 STATIC
 void GenJumpIfZero(int label)
@@ -604,41 +528,59 @@ void GenJumpIfNotZero(int label)
                          MipsOpNumLabel, label);
 }
 
+fpos_t GenPrologPos;
+int GenLeaf;
+
+STATIC
+void GenWriteFrameSize(void)
+{
+  unsigned size = 8/*RA + FP*/ - CurFxnMinLocalOfs;
+  printf2("\tsubu\t$29, $29, %10u\n", size); // 10 chars are enough for 32-bit unsigned ints
+  printf2("\tsw\t$30, %10u($29)\n", size - 8);
+  printf2("\taddu\t$30, $29, %10u\n", size - 8);
+  printf2("\t%csw\t$31, 4($30)\n", GenLeaf ? '#' : ' ');
+}
+
+STATIC
+void GenUpdateFrameSize(void)
+{
+  fpos_t pos;
+  fgetpos(OutFile, &pos);
+  fsetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
+  fsetpos(OutFile, &pos);
+}
+
 STATIC
 void GenFxnProlog(void)
 {
-  GenPrintInstr3Operands(MipsInstrSubU, 0,
-                         MipsOpRegSp, 0,
-                         MipsOpRegSp, 0,
-                         MipsOpConst, 8);
-
-  GenPrintInstr2Operands(MipsInstrSW, 0,
-                         MipsOpRegRa, 0,
-                         MipsOpIndRegSp, 4);
-
-  GenPrintInstr2Operands(MipsInstrSW, 0,
-                         MipsOpRegFp, 0,
-                         MipsOpIndRegSp, 0);
-
-  GenPrintInstr2Operands(MipsInstrMov, 0,
-                         MipsOpRegFp, 0,
-                         MipsOpRegSp, 0);
-
-  if (CurFxnParamCntMax)
+  if (CurFxnParamCntMin && CurFxnParamCntMax)
   {
     int i, cnt = CurFxnParamCntMax;
     if (cnt > 4)
       cnt = 4;
+    // TBD!!! for structure passing use the cumulative parameter size
+    // instead of the number of parameters. Currently this bug is masked
+    // by the subroutine that pushes structures on the stack (it copies
+    // all words except the first to the stack). But passing structures
+    // in registers from assembly code won't always work.
     for (i = 0; i < cnt; i++)
       GenPrintInstr2Operands(MipsInstrSW, 0,
                              MipsOpRegA0 + i, 0,
-                             MipsOpIndRegFp, 8 + 4 * i);
+                             MipsOpIndRegSp, 4 * i);
   }
+
+  GenLeaf = 1; // will be reset to 0 if a call is generated
+
+  fgetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
 }
 
 STATIC
-void GenLocalAlloc(int size)
+void GenGrowStack(int size)
 {
+  if (!size)
+    return;
   GenPrintInstr3Operands(MipsInstrSubU, 0,
                          MipsOpRegSp, 0,
                          MipsOpRegSp, 0,
@@ -648,25 +590,30 @@ void GenLocalAlloc(int size)
 STATIC
 void GenFxnEpilog(void)
 {
-  GenPrintInstr2Operands(MipsInstrMov, 0,
-                         MipsOpRegSp, 0,
-                         MipsOpRegFp, 0);
+  GenUpdateFrameSize();
+
+  if (!GenLeaf)
+    GenPrintInstr2Operands(MipsInstrLW, 0,
+                           MipsOpRegRa, 0,
+                           MipsOpIndRegFp, 4);
 
   GenPrintInstr2Operands(MipsInstrLW, 0,
                          MipsOpRegFp, 0,
-                         MipsOpIndRegSp, 0);
-
-  GenPrintInstr2Operands(MipsInstrLW, 0,
-                         MipsOpRegRa, 0,
-                         MipsOpIndRegSp, 4);
+                         MipsOpIndRegFp, 0);
 
   GenPrintInstr3Operands(MipsInstrAddU, 0,
                          MipsOpRegSp, 0,
                          MipsOpRegSp, 0,
-                         MipsOpConst, 8);
+                         MipsOpConst, 8/*RA + FP*/ - CurFxnMinLocalOfs);
 
   GenPrintInstr1Operand(MipsInstrJ, 0,
                         MipsOpRegRa, 0);
+}
+
+STATIC
+int GenMaxLocalsSize(void)
+{
+  return 0x7FFFFFFF;
 }
 
 STATIC
@@ -735,10 +682,6 @@ int GenGetBinaryOperatorInstr(int tok)
 STATIC
 void GenPreIdentAccess(int label)
 {
-#ifdef ALLOW_GP
-  if (UseGp)
-    return;
-#endif
   printf2("\t.set\tnoat\n\tlui\t$1, %%hi(");
   GenPrintLabel(IdentTable + label);
   puts2(")");
@@ -747,10 +690,6 @@ void GenPreIdentAccess(int label)
 STATIC
 void GenPostIdentAccess(void)
 {
-#ifdef ALLOW_GP
-  if (UseGp)
-    return;
-#endif
   puts2("\t.set\tat");
 }
 
@@ -777,7 +716,7 @@ void GenReadIdent(int regDst, int opSz, int label)
   }
   GenPrintInstr2Operands(instr, 0,
                          regDst, 0,
-                         MipsOpLabelGpOption, label);
+                         MipsOpLabelLo, label);
   GenPostIdentAccess();
 }
 
@@ -846,7 +785,7 @@ void GenWriteIdent(int regSrc, int opSz, int label)
   }
   GenPrintInstr2Operands(instr, 0,
                          regSrc, 0,
-                         MipsOpLabelGpOption, label);
+                         MipsOpLabelLo, label);
   GenPostIdentAccess();
 }
 
@@ -1117,6 +1056,8 @@ void GenPopReg(void)
 
 #define tokRevIdent    0x100
 #define tokRevLocalOfs 0x101
+#define tokAssign0     0x102
+#define tokNum0        0x103
 
 STATIC
 void GenPrep(int* idx)
@@ -1146,7 +1087,7 @@ void GenPrep(int* idx)
       {
         if (tok == tokUMod || tok == tokAssignUMod)
         {
-          stack[oldIdxRight][1] = uint2int(m - 1);
+          stack[oldIdxRight][1] = (int)(m - 1);
           tok = (tok == tokUMod) ? '&' : tokAssignAnd;
         }
         else
@@ -1167,6 +1108,7 @@ void GenPrep(int* idx)
     stack[oldIdxRight + 1][0] = tokNumInt; // reduce the number of cases since tokNumInt and tokNumUint are handled the same way
     // fallthrough
   case tokNumInt:
+  case tokNum0:
   case tokIdent:
   case tokLocalOfs:
     break;
@@ -1206,6 +1148,16 @@ void GenPrep(int* idx)
     break;
 
   case '=':
+    if (oldIdxRight + 1 == sp - 1 &&
+        (stack[oldIdxRight][0] == tokNumInt || stack[oldIdxRight][0] == tokNumUint) &&
+        truncUint(stack[oldIdxRight][1]) == 0)
+    {
+      // Special case for assigning 0 while throwing away the expression result value
+      // TBD??? ,
+      stack[oldIdxRight][0] = tokNum0; // this zero constant will not be loaded into a register
+      stack[oldIdxRight + 1][0] = tokAssign0; // change '=' to tokAssign0
+    }
+    // fallthrough
   case tokAssignAdd:
   case tokAssignSub:
   case tokAssignMul:
@@ -1600,7 +1552,7 @@ void GenExpr0(void)
   int paramOfs = 0;
   int t = sp - 1;
 
-  if (stack[t][0] == tokIf || stack[t][0] == tokIfNot)
+  if (stack[t][0] == tokIf || stack[t][0] == tokIfNot || stack[t][0] == tokReturn)
     t--;
   GenPrep(&t);
 
@@ -1639,7 +1591,9 @@ void GenExpr0(void)
     case tokGoto: printf2(" # sh-circ-goto "); break;
     case tokLogAnd: printf2(" # short-circuit && target\n"); break;
     case tokLogOr: printf2(" # short-circuit || target\n"); break;
-    case tokIf: case tokIfNot: break;
+    case tokIf: case tokIfNot: case tokReturn: break;
+    case tokNum0: printf2(" # 0\n"); break;
+    case tokAssign0:  printf2(" # =\n"); break;
     default: printf2(" # %s\n", GetTokenName(tok)); break;
     }
 #endif
@@ -1706,7 +1660,7 @@ void GenExpr0(void)
         GenPushReg();
       gotUnary = 0;
       if (maxCallDepth != 1 && v < 16)
-        GenLocalAlloc(16 - v);
+        GenGrowStack(16 - v);
       paramOfs = v - 4;
       if (maxCallDepth == 1 && paramOfs >= 0 && paramOfs <= 12)
       {
@@ -1739,6 +1693,7 @@ void GenExpr0(void)
       break;
 
     case ')':
+      GenLeaf = 0;
       if (maxCallDepth != 1)
       {
         if (v >= 4)
@@ -1760,7 +1715,7 @@ void GenExpr0(void)
       }
       else
       {
-        GenLocalAlloc(16);
+        GenGrowStack(16);
       }
       if (stack[i - 1][0] == tokIdent)
       {
@@ -1774,7 +1729,7 @@ void GenExpr0(void)
       }
       if (v < 16)
         v = 16;
-      GenLocalAlloc(-v);
+      GenGrowStack(-v);
       break;
 
     case tokUnaryStar:
@@ -2085,6 +2040,21 @@ void GenExpr0(void)
       GenExtendRegIfNeeded(GenWreg, v);
       break;
 
+    case tokAssign0: // assignment of 0, while throwing away the expression result value
+      if (stack[i - 1][0] == tokRevLocalOfs)
+      {
+        GenWriteLocal(MipsOpRegZero, v, stack[i - 1][1]);
+      }
+      else if (stack[i - 1][0] == tokRevIdent)
+      {
+        GenWriteIdent(MipsOpRegZero, v, stack[i - 1][1]);
+      }
+      else
+      {
+        GenWriteIndirect(GenWreg, MipsOpRegZero, v);
+      }
+      break;
+
     case '<':         GenCmp(&i, 0x00); break;
     case tokLEQ:      GenCmp(&i, 0x01); break;
     case '>':         GenCmp(&i, 0x02); break;
@@ -2180,6 +2150,8 @@ void GenExpr0(void)
     case tokRevIdent:
     case tokRevLocalOfs:
     case tokComma:
+    case tokReturn:
+    case tokNum0:
       break;
 
     case tokIf:
@@ -2201,103 +2173,36 @@ void GenExpr0(void)
 }
 
 STATIC
-unsigned GenStrData(int generatingCode, unsigned requiredLen)
+void GenDumpChar(int ch)
 {
-  int i;
-  unsigned total = 0;
-
-  // insert string literals into the code
-  for (i = 0; i < sp; i++)
+  if (ch < 0)
   {
-    int tok = stack[i][0];
-    char* p = IdentTable + stack[i][1];
-    if (tok == tokIdent && isdigit(*p))
-    {
-      int label = atoi(p);
-      unsigned len;
-
-      p = FindString(label);
-      len = *p++ & 0xFF;
-
-      // If this is a string literal initializing an array of char,
-      // truncate or pad it as necessary.
-      if (requiredLen)
-      {
-        if (len >= requiredLen)
-        {
-          len = requiredLen; // copy count
-          requiredLen = 0; // count to be zeroed out
-        }
-        else
-        {
-          requiredLen -= len; // count to be zeroed out
-        }
-      }
-      // Also, calculate its real size for incompletely typed arrays.
-      total = len + requiredLen;
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenJumpUncond(label + 1);
-        }
-        else
-        {
-          puts2(CodeFooter);
-          puts2(DataHeader);
-        }
-      }
-
-      GenNumLabel(label);
-
-      GenStartAsciiString();
-      printf2("\"");
-      while (len--)
-      {
-        // quote ASCII chars for better readability
-        if (*p >= 0x20 && *p <= 0x7E)
-        {
-          if (*p == '\"' || *p == '\\')
-            printf2("\\");
-          printf2("%c", *p);
-        }
-        else
-        {
-          printf2("\\%03o", *p & 0xFFu);
-        }
-        p++;
-      }
-      while (requiredLen)
-      {
-        printf2("\\000");
-        requiredLen--;
-      }
-      printf2("\"");
-      puts2("");
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenNumLabel(label + 1);
-        }
-        else
-        {
-          puts2(DataFooter);
-          puts2(CodeHeader);
-        }
-      }
-    }
+    if (TokenStringLen)
+      printf2("\"\n");
+    return;
   }
 
-  return total;
+  if (TokenStringLen == 0)
+  {
+    GenStartAsciiString();
+    printf2("\"");
+  }
+
+  if (ch >= 0x20 && ch <= 0x7E)
+  {
+    if (ch == '"' || ch == '\\')
+      printf2("\\");
+    printf2("%c", ch);
+  }
+  else
+  {
+    printf2("\\%03o", ch);
+  }
 }
 
 STATIC
 void GenExpr(void)
 {
-  GenStrData(1, 0);
   GenExpr0();
 }
 
@@ -2306,19 +2211,11 @@ void GenFin(void)
 {
   if (StructCpyLabel)
   {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof StructCpyLabel) / 3];
-    char *p = s + sizeof s;
     int lbl = LabelCnt++;
 
-    *--p = '\0';
-    p = lab2str(p, StructCpyLabel);
-    *--p = '_';
-    *--p = '_';
+    puts2(CodeHeaderFooter[0]);
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
+    GenNumLabel(StructCpyLabel);
 
     puts2("\tmove\t$2, $6\n"
           "\tmove\t$3, $6");
@@ -2338,64 +2235,44 @@ void GenFin(void)
     GenNop();
 #endif
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
 
-#ifdef USE_SWITCH_TAB
-  if (SwitchJmpLabel)
+#ifndef NO_STRUCT_BY_VAL
+  if (StructPushLabel)
   {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof SwitchJmpLabel) / 3];
-    char *p = s + sizeof s;
-    int lbl = (LabelCnt += 3) - 3;
+    int lbl = LabelCnt++;
 
-    *--p = '\0';
-    p = lab2str(p, SwitchJmpLabel);
-    *--p = '_';
-    *--p = '_';
+    puts2(CodeHeaderFooter[0]);
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
+    GenNumLabel(StructPushLabel);
 
-    GenLabel(p, 1);
-
-    puts2("\tlw\t$2, 0($4)\n"
-          "\tlw\t$31, 4($4)");
-    printf2("\tbeq\t$2, $0, "); GenPrintNumLabel(lbl + 2); // beq $2, $0, L3
+    puts2("\tmove\t$6, $5\n"
+          "\taddiu\t$6, $6, 3\n"
+          "\tli\t$3, -4\n"
+          "\tand\t$6, $6, $3\n"
+          "\tsubu\t$29, $29, $6\n"
+          "\taddiu\t$3, $29, 16\n"
+          "\tmove\t$2, $3");
+    GenNumLabel(lbl);
+    puts2("\tlbu\t$6, 0($4)\n"
+          "\taddiu\t$4, $4, 1\n"
+          "\taddiu\t$5, $5, -1\n"
+          "\tsb\t$6, 0($3)\n"
+          "\taddiu\t$3, $3, 1");
+    printf2("\tbne\t$5, $0, "); GenPrintNumLabel(lbl);
     puts2("");
 #ifdef REORDER_WORKAROUND
     GenNop();
 #endif
-    GenNumLabel(lbl); // L1:
-    puts2("\taddiu\t$4, $4, 8\n"
-          "\tlw\t$6, 0($4)");
-    printf2("\tbne\t$6, $5, "); GenPrintNumLabel(lbl + 1); // bne $6, $6, L2
-    puts2("");
-#ifdef REORDER_WORKAROUND
-    GenNop();
-#endif
-    puts2("\tlw\t$31, 4($4)");
-    printf2("\tj "); GenPrintNumLabel(lbl + 2); // j L3
-    puts2("");
-#ifdef REORDER_WORKAROUND
-    GenNop();
-#endif
-    GenNumLabel(lbl + 1); // L2:
-    puts2("\taddiu\t$2, $2, -1");
-    printf2("\tbne\t$2, $0, "); GenPrintNumLabel(lbl); // bne $2, $0, L1
-    puts2("");
-#ifdef REORDER_WORKAROUND
-    GenNop();
-#endif
-    GenNumLabel(lbl + 2); // L3:
-    puts2("\taddiu\t$29, $29, 16\n"
+    puts2("\tlw\t$2, 0($2)\n"
+          "\taddiu\t$29, $29, 4\n"
           "\tj\t$31");
 #ifdef REORDER_WORKAROUND
     GenNop();
 #endif
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
 #endif
 }

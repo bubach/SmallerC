@@ -1,15 +1,22 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 char* __EnvVar;
 
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned char peekb(unsigned seg, unsigned ofs)
 {
@@ -29,7 +36,7 @@ unsigned char peekb(unsigned seg, unsigned ofs)
 }
 #endif
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned peek(unsigned seg, unsigned ofs)
 {
@@ -48,7 +55,7 @@ unsigned peek(unsigned seg, unsigned ofs)
 }
 #endif
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned DosGetPspSeg(void)
 {
@@ -67,6 +74,7 @@ unsigned DosGetPspSeg(void)
 }
 #endif
 
+#ifndef _DPMI
 char* getenv(char* name)
 {
   unsigned psp = DosGetPspSeg();
@@ -122,6 +130,64 @@ char* getenv(char* name)
     }
   }
 }
+#endif
+#ifdef _DPMI
+#include "idpmi.h"
+char* getenv(char* name)
+{
+  unsigned char* env = __dpmi_env;
+  unsigned nlen = strlen(name);
+  unsigned i, start;
+
+  for (start = i = 0; ; i++)
+  {
+    int c = env[i];
+    if (c == '=')
+    {
+      unsigned vlen = 0, match = 0;
+      if (i - start == nlen)
+      {
+        unsigned j;
+        match = 1;
+        for (j = 0; j < nlen; j++)
+          if (env[start + j] != (unsigned char)name[j])
+          {
+            match = 0;
+            break;
+          }
+      }
+      i++;
+      while (env[i + vlen] != '\0')
+        vlen++;
+      if (match)
+      {
+        char* p;
+        unsigned j = i;
+        if (__EnvVar)
+          free(__EnvVar);
+        if (!(p = __EnvVar = malloc(vlen + 1)))
+        {
+          return 0;
+        }
+        while ((*p++ = env[j++]) != '\0');
+        return __EnvVar;
+      }
+      i += vlen;
+      c = '\0';
+    }
+
+    if (c == '\0')
+    {
+      start = i + 1;
+      if (env[start] == '\0')
+      {
+        // Reached the end of the list of environment variables
+        return 0;
+      }
+    }
+  }
+}
+#endif
 
 #endif // _DOS
 

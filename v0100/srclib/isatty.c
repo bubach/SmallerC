@@ -1,8 +1,15 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <unistd.h>
+
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
 
 #ifdef _DOS
 
@@ -26,7 +33,8 @@ int DosQueryDevFileFlags(int handle, unsigned* flagsOrError)
       "mov [si], bx");
 }
 #endif
-#ifdef __HUGE__
+
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosQueryDevFileFlags(int handle, unsigned* flagsOrError)
 {
@@ -42,13 +50,38 @@ int DosQueryDevFileFlags(int handle, unsigned* flagsOrError)
       "and bx, cx\n"
       "or  bx, dx");
   asm("and eax, 1\n"
-      "mov esi, [bp + 12]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("mov [esi], ebx");
+#endif
 }
 #endif
+
+#ifdef _DPMI
+static
+int DosQueryDevFileFlags(int handle, unsigned* flagsOrError)
+{
+  asm("mov ax, 0x4400\n"
+      "mov bx, [ebp + 8]\n"
+      "int 0x21");
+  asm("movzx ebx, ax\n"
+      "cmc\n"
+      "sbb ax, ax");
+  asm("and dx, ax\n"
+      "mov cx, ax\n"
+      "not cx\n"
+      "and bx, cx\n"
+      "or  bx, dx");
+  asm("and eax, 1\n"
+      "mov esi, [ebp + 12]\n"
+      "mov [esi], ebx");
+}
+#endif // _DPMI
 
 int isatty(int fd)
 {

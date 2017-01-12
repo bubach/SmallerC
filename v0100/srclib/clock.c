@@ -1,24 +1,49 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <time.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned long helper(void)
 {
+#ifdef __HUGE__
   asm("mov ax, 0x40\n"
       "mov ds, ax\n"
-      "mov eax, [0x6c]\n"
+      "mov eax, [0x6c]");
+#else
+  asm("mov eax, [0x46c]");
+#endif
+  asm("mov ecx, 90\n"
+      "mul ecx\n"
+      "inc ecx\n"
+      "div ecx");
+}
+#endif // __HUGE__
+
+#ifdef _DPMI
+static
+unsigned long helper(void)
+{
+  asm("mov eax, [0x46c]\n"
       "mov ecx, 90\n"
       "mul ecx\n"
       "inc ecx\n"
       "div ecx");
 }
+#endif // _DPMI
 
+#ifdef __SMALLER_C_32__
 clock_t clock(void)
 {
   static unsigned initialized, initticks;

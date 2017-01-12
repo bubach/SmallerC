@@ -1,11 +1,22 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <stdlib.h>
 #include "istdio.h"
 #include <ctype.h>
 #include <string.h>
+
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
+#ifdef __SMALLER_C_32__
+extern void __x87init(void);
+#endif
 
 #ifdef _DOS
 
@@ -32,68 +43,78 @@ struct execparams
   unsigned short Fcb2Seg;
 };
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosExec(char* comspec, struct execparams* p, unsigned* error)
 {
-  asm("section .relot");
-  asm("dd     rel1");
-  asm("section .text");
-  asm("db     0x66, 0xB8"); // mov eax, relocated savearea (far address: seg:ofs)
-  asm("rel1:");
-  asm("dd     savearea");
-  asm("mov    bx, ax");
-  asm("shr    eax, 16");
-  asm("mov    ds, ax");
-  asm("mov    [bx], ebp");
-  asm("mov    [bx+4], esp");
-  asm("mov    [bx+8], ss");
-  asm("jmp    skipdata");
-  asm("savearea:");
-  asm("dw     0,0,0,0,0");
-  asm("skipdata:");
+  asm("section .relot\n"
+      "dd      rel1\n"
+      "section .text\n"
+      "db      0x66, 0xB8\n" // mov eax, relocated savearea (far address: seg:ofs)
+      "rel1:\n"
+      "dd      savearea\n"
+      "mov     bx, ax\n"
+      "shr     eax, 16\n"
+      "mov     ds, ax\n"
+      "mov     [bx], ebp\n"
+      "mov     [bx+4], esp\n"
+      "mov     [bx+8], ss\n"
+      "jmp     skipdata\n"
+      "savearea:\n"
+      "dw      0,0,0,0,0\n"
+      "skipdata:\n"
 
-  asm("mov ax, 0x4b00\n"
-      "mov edx, [bp + 8]\n"
-      "ror edx, 4\n"
-      "mov ds, dx\n"
-      "shr edx, 28");
-  asm("mov ebx, [bp + 12]\n"
-      "ror ebx, 4\n"
-      "mov es, bx\n"
-      "shr ebx, 28\n"
-      "int 0x21");
+      "mov     ax, 0x4b00\n"
+      "mov     edx, [bp + 8]\n"
+      "ror     edx, 4\n"
+      "mov     ds, dx\n"
+      "shr     edx, 28\n"
+      "mov     ebx, [bp + 12]\n"
+      "ror     ebx, 4\n"
+      "mov     es, bx\n"
+      "shr     ebx, 28\n"
+      "int     0x21\n"
 
-  asm("cli"); // ss:sp may have been destroyed by int 0x21, prevent ISRs from using bad stack by disabling interrupts
-  asm("mov    cx, ax"); // save error code in cx
-  asm("rcl    dx, 1"); // save carry flag in dx bit 0
-  asm("section .relot");
-  asm("dd     rel2");
-  asm("section .text");
-  asm("db     0x66, 0xB8"); // mov eax, relocated savearea (far address: seg:ofs)
-  asm("rel2:");
-  asm("dd     savearea");
-  asm("mov    bx, ax");
-  asm("shr    eax, 16");
-  asm("mov    ds, ax");
-  asm("mov    ss, [bx+8]");
-  asm("mov    esp, [bx+4]");
-  asm("sti"); // it's safe to enable interrupts now
-  asm("mov    ebp, [bx]");
-  asm("mov    ax, cx"); // restore error code in ax
-  asm("rcr    dx, 1"); // restore carry flag from dx bit 0
+      "cli\n" // ss:sp may have been destroyed by int 0x21, prevent ISRs from using bad stack by disabling interrupts
+      "mov     cx, ax\n" // save error code in cx
+      "rcl     dx, 1\n" // save carry flag in dx bit 0
+      "section .relot\n"
+      "dd      rel2\n"
+      "section .text\n"
+      "db      0x66, 0xB8\n" // mov eax, relocated savearea (far address: seg:ofs)
+      "rel2:\n"
+      "dd      savearea\n"
+      "mov     bx, ax\n"
+      "shr     eax, 16\n"
+      "mov     ds, ax\n"
+      "mov     ss, [bx+8]\n"
+      "mov     esp, [bx+4]\n"
+      "sti\n" // it's safe to enable interrupts now
+      "mov     ebp, [bx]\n"
+      "mov     ax, cx\n" // restore error code in ax
+      "rcr     dx, 1\n" // restore carry flag from dx bit 0
 
-  asm("movzx ebx, ax\n"
+      "movzx   ebx, ax\n"
       "cmc\n"
-      "sbb ax, ax\n"
-      "and eax, 1\n"
-      "mov esi, [bp + 16]\n"
-      "ror esi, 4\n"
-      "mov ds, si\n"
-      "shr esi, 28\n"
-      "mov [si], ebx");
+      "sbb     ax, ax\n"
+      "and     eax, 1\n"
+      "mov     esi, [bp + 16]\n"
+      "ror     esi, 4\n"
+      "mov     ds, si\n"
+      "shr     esi, 28\n"
+      "mov     [si], ebx");
+#ifdef __UNREAL__
+  asm("push    dword 0\n"
+      "pop     es\n"
+      "pop     ds");
+  // Just in case set up unreal mode again, don't depend on #GP handler to do it.
+  extern void __setup_unreal(void);
+  __setup_unreal();
+#endif
 }
+#endif // __HUGE_OR_UNREAL__
 
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned DosGetExitCode(void)
 {
@@ -101,38 +122,38 @@ unsigned DosGetExitCode(void)
       "int 0x21\n"
       "and eax, 0xFFFF");
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
 int DosExec(char* comspec, struct execparams* p, unsigned* error)
 {
-  asm("mov [cs:saveebp], ebp");
-  asm("mov [cs:saveesp], esp");
-  asm("mov [cs:savess], ss");
-  asm("jmp skipdata");
-  asm("saveebp dd 0");
-  asm("saveesp dd 0");
-  asm("savess dw 0");
-  asm("skipdata:");
+  asm("mov     [cs:saveebp], ebp\n"
+      "mov     [cs:saveesp], esp\n"
+      "mov     [cs:savess], ss\n"
+      "jmp     skipdata\n"
+      "saveebp dd 0\n"
+      "saveesp dd 0\n"
+      "savess  dw 0\n"
+      "skipdata:\n"
 
-  asm("mov ax, 0x4b00\n"
-      "mov dx, [bp + 4]\n"
-      "mov bx, [bp + 6]\n"
-      "int 0x21");
+      "mov     ax, 0x4b00\n"
+      "mov     dx, [bp + 4]\n"
+      "mov     bx, [bp + 6]\n"
+      "int     0x21\n"
 
-  asm("mov ss, [cs:savess]");
-  asm("mov esp, [cs:saveesp]");
-  asm("mov ebp, [cs:saveebp]");
-  asm("mov ds, [cs:savess]");
-  asm("mov es, [cs:savess]");
+      "mov     ss, [cs:savess]\n"
+      "mov     esp, [cs:saveesp]\n"
+      "mov     ebp, [cs:saveebp]\n"
+      "mov     ds, [cs:savess]\n"
+      "mov     es, [cs:savess]\n"
 
-  asm("mov bx, ax\n"
+      "mov     bx, ax\n"
       "cmc\n"
-      "sbb ax, ax\n"
-      "and ax, 1\n"
-      "mov si, [bp + 8]\n"
-      "mov [si], bx");
+      "sbb     ax, ax\n"
+      "and     ax, 1\n"
+      "mov     si, [bp + 8]\n"
+      "mov     [si], bx");
 }
 
 static
@@ -142,6 +163,155 @@ unsigned DosGetExitCode(void)
       "int 0x21");
 }
 #endif // __SMALLER_C_16__
+
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+
+static
+unsigned cs(void)
+{
+  asm("xor eax, eax\n"
+      "mov ax, cs");
+}
+
+static
+int DpmiGetLdtDescr(int sel, unsigned long descr[2])
+{
+  asm("mov ebx, [ebp + 8]\n"
+      "mov edi, [ebp + 12]\n"
+      "mov ax, 0xb\n"
+      "int 0x31\n"
+      "sbb eax, eax");
+}
+
+static
+int DpmiFreeLdtDescr(int sel)
+{
+  asm("mov ebx, [ebp + 8]\n"
+      "mov ax, 1\n"
+      "int 0x31\n"
+      "sbb eax, eax");
+}
+
+static
+int DosExec(char* comspec, char* params, unsigned* error)
+{
+  unsigned short* penvsel = (unsigned short*)((char*)__dpmi_psp + 0x2c);
+  unsigned short envsel = *penvsel;
+  unsigned clen = strlen(comspec) + 1;
+  unsigned plen = strlen(params) + 1;
+  struct fcb fcbinit = { 0, "        ", "   " }; // Don't know FCBs, don't care
+
+  struct fcb* pfcb1 = (struct fcb*)__dpmi_iobuf;
+  struct fcb* pfcb2 = pfcb1 + 1;
+  struct execparams* peparams = (struct execparams*)(pfcb2 + 1);
+  char* pparams = (char*)(peparams + 1);
+  char* pcomspec = pparams;
+
+  __dpmi_int_regs regs;
+  int e;
+
+  if (plen > (__DPMI_IOFBUFSZ - 2*sizeof(struct fcb) - sizeof(struct execparams)) ||
+      clen > (__DPMI_IOFBUFSZ - 2*sizeof(struct fcb) - sizeof(struct execparams)) - plen)
+  {
+    *error = -1;
+    return 0;
+  }
+
+  *pfcb2 = *pfcb1 = fcbinit;
+  peparams->EnvSeg = 0;
+  peparams->ParamsOfs = (unsigned)pparams & 0xF;
+  peparams->ParamsSeg = (unsigned)pparams >> 4;
+  peparams->Fcb1Ofs = (unsigned)pfcb1 & 0xF;
+  peparams->Fcb1Seg = (unsigned)pfcb1 >> 4;
+  peparams->Fcb2Ofs = (unsigned)pfcb2 & 0xF;
+  peparams->Fcb2Seg = (unsigned)pfcb2 >> 4;
+  memcpy(pparams, params, plen);
+  memcpy(pcomspec += plen, comspec, clen);
+
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x4b00;
+  regs.edx = (unsigned)pcomspec & 0xF;
+  regs.ds = (unsigned)pcomspec >> 4;
+  regs.ebx = (unsigned)peparams & 0xF;
+  regs.es = (unsigned)peparams >> 4;
+
+  // Windows XP's NTVDM leaks LDT descriptors of child DPMI processes and eventually
+  // runs out of available ones in the LDT, which limits the number of DPMI child
+  // processes. Here we try to work around this issue by first noting which
+  // descriptors are allocated before starting a new child and then we see again
+  // which are allocated and compare the two sets. If there are any new descriptors,
+  // we free them. We look only at a relatively small number of descriptors in the
+  // vicinity of the descriptor of the current code segment. LDT descriptors tend
+  // to be allocated more or less sequentially.
+#define DESCR_COUNT 64
+  static int first = 1;
+  static unsigned short startsel;
+  static char unused[DESCR_COUNT];
+  unsigned long descr[2];
+  int i, count;
+  unsigned short sel;
+
+  if (first)
+  {
+    startsel = (cs() - (DESCR_COUNT / 2 * 8)) | 7; // 7: ldt, dpl=3
+    sel = startsel;
+    i = 0;
+    count = DESCR_COUNT;
+    while (count--)
+    {
+      unused[i++] = DpmiGetLdtDescr(sel, descr);
+      sel += 8;
+    }
+    first = 0;
+  }
+
+  // DPMI hosts convert the environment segment inside the PSP to a selector
+  // Temporarily change the selector back to the original segment so DOS can
+  // use it to create a copy of the current environment.
+  *penvsel = (unsigned)__dpmi_env >> 4;
+  e = __dpmi_int(0x21, &regs);
+  *penvsel = envsel;
+
+  // Workaround the problem described in DJGPP's __maybe_fix_w2k_ntvdm_bug(),
+  // which prevents execution of child DPMI processes under Windows.
+  // It looks like on Windows XP it's sufficient to simply read the current PSP
+  // using function 0x51 of int 0x21 and NTVDM will update the internal value
+  // of PSP.
+  asm("mov ah, 0x51\n"
+      "int 0x21");
+
+  // Free the leaked descriptors.
+  // TBD??? This probably breaks DPMI TSRs. Can we do anything about it?
+  sel = startsel;
+  i = 0;
+  count = DESCR_COUNT;
+  while (count--)
+  {
+    if (unused[i++] && !DpmiGetLdtDescr(sel, descr))
+      DpmiFreeLdtDescr(sel);
+    sel += 8;
+  }
+
+  if (e)
+  {
+    *error = -1;
+    return 0;
+  }
+
+  *error = regs.eax & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+
+static
+unsigned DosGetExitCode(void)
+{
+  asm("mov ah, 0x4d\n"
+      "int 0x21\n"
+      "and eax, 0xFFFF");
+}
+#endif // _DPMI
 
 extern char* __strtoklast;
 
@@ -281,9 +451,11 @@ int system(char* cmd)
   char *ev, *comspec, *params = NULL;
   unsigned clen, plen;
   int res = -1;
+#ifndef _DPMI
   struct fcb fcb1 = { 0, "        ", "   " }; // Don't know FCBs, don't care
   struct fcb fcb2 = { 0, "        ", "   " };
   struct execparams eparams;
+#endif
   unsigned error;
   char exe[FILENAME_MAX];
   char* cmdparams;
@@ -311,7 +483,6 @@ int system(char* cmd)
   // If the command ends in .COM or .EXE, we'll execute this command/executable directly
   // (as opposed to using "COMMAND.COM /C command") in order to be able to get its exit code
   // and not the exit code of the command processor (which is typically 0 in DOS).
-
   cmdparams = cmd;
   if (helper(exe, &cmdparams))
   {
@@ -369,6 +540,7 @@ int system(char* cmd)
   if (comspec == exe && *exe == '.' && exe[1] == '/')
     exe[1] = '\\';
 
+#ifndef _DPMI
   eparams.EnvSeg = 0; // create and use a copy of the current environment
 #ifdef __SMALLER_C_16__
   eparams.ParamsOfs = params;
@@ -378,7 +550,7 @@ int system(char* cmd)
   eparams.Fcb2Ofs = &fcb2;
   eparams.Fcb2Seg = __getSS();
 #endif
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
   eparams.ParamsOfs = (unsigned)params & 0xF;
   eparams.ParamsSeg = (unsigned)params >> 4;
   eparams.Fcb1Ofs = (unsigned)&fcb1 & 0xF;
@@ -386,14 +558,22 @@ int system(char* cmd)
   eparams.Fcb2Ofs = (unsigned)&fcb2 & 0xF;
   eparams.Fcb2Seg = (unsigned)&fcb2 >> 4;
 #endif
+#endif
 
   // Flush everything
   fflush(NULL);
 
+#ifndef _DPMI
   if (DosExec(comspec, &eparams, &error))
   {
     res = DosGetExitCode();
   }
+#else
+  if (DosExec(comspec, params, &error))
+  {
+    res = DosGetExitCode();
+  }
+#endif
   else
   {
   }
@@ -404,6 +584,10 @@ end:
     free(comspec);
   if (params)
     free(params);
+
+#ifdef __SMALLER_C_32__
+  __x87init();
+#endif
 
   return res;
 }

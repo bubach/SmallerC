@@ -1,13 +1,20 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosExtOpen(char* name, int mode, int attr, int action, unsigned* handleOrError)
 {
@@ -24,13 +31,19 @@ int DosExtOpen(char* name, int mode, int attr, int action, unsigned* handleOrErr
       "cmc\n"
       "sbb ax, ax\n"
       "and eax, 1\n"
-      "mov esi, [bp + 24]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 24]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("push word 0\n"
+      "pop  ds\n"
+      "mov  [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -50,6 +63,37 @@ int DosExtOpen(char* name, int mode, int attr, int action, unsigned* handleOrErr
       "mov [si], bx");
 }
 #endif // __SMALLER_C_16__
+
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+static
+int DosExtOpen(char* name, int mode, int attr, int action, unsigned* handleOrError)
+{
+  __dpmi_int_regs regs;
+  unsigned nlen = strlen(name) + 1;
+  if (nlen > __DPMI_IOFBUFSZ)
+  {
+    *handleOrError = -1;
+    return 0;
+  }
+  memcpy(__dpmi_iobuf, name, nlen);
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x6c00;
+  regs.ebx = mode;
+  regs.ecx = attr;
+  regs.edx = action;
+  regs.esi = (unsigned)__dpmi_iobuf & 0xF;
+  regs.ds = (unsigned)__dpmi_iobuf >> 4;
+  if (__dpmi_int(0x21, &regs))
+  {
+    *handleOrError = -1;
+    return 0;
+  }
+  *handleOrError = regs.eax & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+#endif // _DPMI
 
 int open(char* name, int oflag, ...)
 {

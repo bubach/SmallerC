@@ -1,9 +1,20 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 extern int main(int argc, char** argv);
 extern void exit(int);
+
+#ifdef __SMALLER_C_32__
+extern void __x87init(void);
+#endif
 
 #include <time.h>
 #include <stdlib.h>
@@ -109,7 +120,7 @@ int __ArgParser__(char* in, char* out, char** argv)
 
 #include "idos.h"
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned char peekb(unsigned seg, unsigned ofs)
 {
@@ -129,7 +140,7 @@ unsigned char peekb(unsigned seg, unsigned ofs)
 }
 #endif
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned peek(unsigned seg, unsigned ofs)
 {
@@ -149,7 +160,7 @@ unsigned peek(unsigned seg, unsigned ofs)
 #endif
 
 /*
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 void pokeb(unsigned seg, unsigned ofs, unsigned char val)
 {
@@ -169,7 +180,7 @@ void pokeb(unsigned seg, unsigned ofs, unsigned char val)
 }
 #endif
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 void poke(unsigned seg, unsigned ofs, unsigned val)
 {
@@ -190,29 +201,44 @@ void poke(unsigned seg, unsigned ofs, unsigned val)
 #endif
 */
 
-#ifdef __HUGE__
+// TBD??? Don't use int 0x21 functions 0x25 & 0x35 for IVT manipulations???
+#ifdef __HUGE_OR_UNREAL__
 void __DosGetVect(int intno, unsigned short farptr[2])
 {
   asm("mov  ah, 0x35\n"
       "mov  al, [bp + 8]\n"
       "int  0x21\n"
-      "mov  esi, [bp + 12]\n"
-      "ror  esi, 4\n"
+      "mov  esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror  esi, 4\n"
       "mov  ds, si\n"
       "shr  esi, 28\n"
       "mov  [si], bx\n"
       "mov  [si + 2], es");
+#else
+  asm("mov  [esi], bx\n"
+      "mov  [esi + 2], es\n"
+      "push word 0\n"
+      "pop  es");
+#endif
 }
 void __DosSetVect(int intno, unsigned short farptr[2])
 {
   asm("mov  ah, 0x25\n"
       "mov  al, [bp + 8]\n"
-      "mov  esi, [bp + 12]\n"
-      "ror  esi, 4\n"
+      "mov  esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror  esi, 4\n"
       "mov  ds, si\n"
       "shr  esi, 28\n"
       "lds  dx, [si]\n"
       "int  0x21");
+#else
+  asm("lds  dx, [esi]\n"
+      "int  0x21\n"
+      "push word 0\n"
+      "pop  ds");
+#endif
 }
 #endif
 #ifdef __SMALLER_C_16__
@@ -239,7 +265,7 @@ void __DosSetVect(int intno, unsigned short farptr[2])
 }
 #endif
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned DosGetPspSeg(void)
 {
@@ -261,6 +287,7 @@ unsigned DosGetPspSeg(void)
 static char line[80/*executable name*/ + 128/*parameters*/];
 static char* argvs[1/*executable name*/ + 128/2/*parameters*/ + 1/*NULL*/] = { "" };
 
+#ifndef _DPMI
 static
 int setargs(int* pargc, char*** pargv)
 {
@@ -316,8 +343,32 @@ unsigned short __Int00DE[2];
 //unsigned short __Int03BP[2];
 unsigned short __Int04OF[2];
 unsigned short __Int06UD[2];
+#endif
 
-#ifdef __HUGE__
+#ifdef _DPMI
+#include <string.h>
+#include <stdlib.h>
+#include "idpmi.h"
+#include "istdio.h"
+
+static
+int setargs(int* pargc, char*** pargv, void* psp, char* argv0)
+{
+  unsigned char* p = (unsigned char*)psp + 0x80;
+  unsigned len = *p++;
+  // First, store the full program name.
+  argvs[0] = argv0;
+  // Next, copy program arguments from the PSP.
+  memcpy(line, p, len);
+  line[len] = '\0';
+  // Finally, parse them
+  *pargc = 1 + __ArgParser__(line, line, argvs + 1);
+  *pargv = argvs;
+  return 1;
+}
+#endif
+
+#ifdef __HUGE_OR_UNREAL__
 void __interrupt __ExcIsr(void)
 {
   static char msg[] = "\r\nUnhandled exception!\r\n";
@@ -333,6 +384,7 @@ void __interrupt __CtrlCIsr(void)
 }
 #endif
 
+#ifndef _DPMI
 void __start__(void)
 {
   int argc;
@@ -347,7 +399,7 @@ void __start__(void)
   __DosGetVect(4, __Int04OF);
   __DosGetVect(6, __Int06UD);
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
   farptr[0] = (unsigned)&__ExcIsr & 0xF;
   farptr[1] = (unsigned)&__ExcIsr >> 4;
 #endif
@@ -364,7 +416,7 @@ extern unsigned short __getCS(void);
 
   // Register int 0x23/Ctrl+C handler
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
   farptr[0] = (unsigned)&__CtrlCIsr & 0xF;
   farptr[1] = (unsigned)&__CtrlCIsr >> 4;
 #endif
@@ -378,13 +430,45 @@ extern unsigned short __getCS(void);
   // Set argc and argv
   setargs(&argc, &argv);
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
   // Start counting ticks now
   clock();
 #endif
 
+#ifdef __SMALLER_C_32__
+  __x87init();
+#endif
+
   exit(main(argc, argv));
 }
+#endif
+
+#ifdef _DPMI
+void _start(unsigned long exitAddr, void* psp, void* env, char* argv0,
+            void* stubInfo, void* fbuf, void* heapStart, void* heapStop)
+{
+  int argc;
+  char** argv;
+
+  __dpmi_exit_addr = exitAddr;
+  __dpmi_psp = psp;
+  __dpmi_env = env;
+  __dpmi_stubInfo = stubInfo;
+  __dpmi_iobuf = fbuf;
+  __dpmi_heap_start = heapStart;
+  __dpmi_heap_stop = heapStop;
+
+  // Set argc and argv
+  setargs(&argc, &argv, psp, argv0);
+
+  // Start counting ticks now
+  clock();
+
+  __x87init();
+
+  exit(main(argc, argv));
+}
+#endif
 
 #endif // _DOS
 
@@ -473,6 +557,8 @@ void __start__(void)
   // Start counting ticks now
   clock();
 
+  __x87init();
+
   exit(main(argc, argv));
 }
 
@@ -485,6 +571,8 @@ char** __environ;
 void __start__(int argc, char** argv)
 {
   __environ = argv + argc + 1;
+
+  __x87init();
 
   exit(main(argc, argv));
 }

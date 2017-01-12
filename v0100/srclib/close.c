@@ -1,12 +1,19 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <unistd.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosClose(int handle, unsigned* error)
 {
@@ -17,13 +24,17 @@ int DosClose(int handle, unsigned* error)
       "cmc\n"
       "sbb ax, ax\n"
       "and eax, 1\n"
-      "mov esi, [bp + 12]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("mov [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -40,6 +51,23 @@ int DosClose(int handle, unsigned* error)
       "mov [si], bx");
 }
 #endif // __SMALLER_C_16__
+
+#ifdef _DPMI
+static
+int DosClose(int handle, unsigned* error)
+{
+  asm("mov ah, 0x3e\n"
+      "mov ebx, [ebp + 8]\n"
+      "int 0x21");
+  asm("mov ebx, eax\n"
+      "cmc\n"
+      "sbb eax, eax\n"
+      "and eax, 1\n"
+      "mov esi, [ebp + 12]\n"
+      "and ebx, 0xffff\n"
+      "mov [esi], ebx");
+}
+#endif // _DPMI
 
 int close(int fd)
 {

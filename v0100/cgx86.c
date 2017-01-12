@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2012-2014, Alexey Frunze
+Copyright (c) 2012-2016, Alexey Frunze
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -21,17 +21,13 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
 ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
 */
 
 /*****************************************************************************/
 /*                                                                           */
 /*                                Smaller C                                  */
 /*                                                                           */
-/*       A simple and small single-pass C compiler ("small C" class).        */
+/*                 A simple and small single-pass C compiler                 */
 /*                                                                           */
 /*                           x86 code generator                              */
 /*                                                                           */
@@ -60,7 +56,7 @@ void GenAddGlobal(char* s, int use)
 {
   int i = 0;
   int l;
-  if (OutputFormat != FormatFlat && GenExterns)
+  if (GenExterns)
   {
     while (i < GlobalsTableLen)
     {
@@ -86,7 +82,7 @@ void GenInit(void)
 {
   // initialization of target-specific code generator
   SizeOfWord = 2;
-  OutputFormat = FormatSegTurbo;
+  OutputFormat = FormatSegmented;
   UseLeadingUnderscores = 1;
 }
 
@@ -96,20 +92,15 @@ int GenInitParams(int argc, char** argv, int* idx)
   (void)argc;
   // initialization of target-specific code generator with parameters
 
-  if (!strcmp(argv[*idx], "-seg16t"))
+  if (!strcmp(argv[*idx], "-nobss"))
   {
-    // this is the default option for x86
-    OutputFormat = FormatSegTurbo; SizeOfWord = 2;
+    UseBss = 0;
     return 1;
   }
   else if (!strcmp(argv[*idx], "-seg16"))
   {
+    // this is the default option for x86
     OutputFormat = FormatSegmented; SizeOfWord = 2;
-    return 1;
-  }
-  else if (!strcmp(argv[*idx], "-flat16"))
-  {
-    OutputFormat = FormatFlat; SizeOfWord = 2;
     return 1;
   }
 #ifdef CAN_COMPILE_32BIT
@@ -118,14 +109,14 @@ int GenInitParams(int argc, char** argv, int* idx)
     OutputFormat = FormatSegmented; SizeOfWord = 4;
     return 1;
   }
-  else if (!strcmp(argv[*idx], "-flat32"))
-  {
-    OutputFormat = FormatFlat; SizeOfWord = 4;
-    return 1;
-  }
   else if (!strcmp(argv[*idx], "-huge"))
   {
     OutputFormat = FormatSegHuge; SizeOfWord = 4;
+    return 1;
+  }
+  else if (!strcmp(argv[*idx], "-unreal"))
+  {
+    OutputFormat = FormatSegUnreal; SizeOfWord = 4;
     return 1;
   }
   else if (!strcmp(argv[*idx], "-winstack"))
@@ -144,27 +135,14 @@ void GenInitFinalize(void)
   // finalization of initialization of target-specific code generator
 
   // Change the output assembly format/content according to the options
-  if (OutputFormat == FormatSegTurbo)
-  {
-    FileHeader = "SEGMENT _TEXT PUBLIC CLASS=CODE USE16\n"
-                 "SEGMENT _DATA PUBLIC CLASS=DATA\n";
-    CodeHeader = "SEGMENT _TEXT";
-    CodeFooter = "; SEGMENT _TEXT";
-    DataHeader = "SEGMENT _DATA";
-    DataFooter = "; SEGMENT _DATA";
-  }
+  CodeHeaderFooter[0] = "section .text";
+  DataHeaderFooter[0] = "section .data";
+  RoDataHeaderFooter[0] = "section .rodata";
+  BssHeaderFooter[0] = "section .bss";
+  if (SizeOfWord == 2 || OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
+    FileHeader = "bits 16\n";
   else
-  {
-    if (OutputFormat == FormatSegmented || OutputFormat == FormatSegHuge)
-    {
-      CodeHeader = "section .text";
-      DataHeader = "section .data";
-    }
-    if (SizeOfWord == 2 || OutputFormat == FormatSegHuge)
-      FileHeader = "bits 16\n";
-    else
-      FileHeader = "bits 32\n";
-  }
+    FileHeader = "bits 32\n";
 }
 
 STATIC
@@ -174,9 +152,9 @@ void GenStartCommentLine(void)
 }
 
 STATIC
-void GenWordAlignment(void)
+void GenWordAlignment(int bss)
 {
-  printf2("\talign %d\n", SizeOfWord);
+  printf2(bss ? "\talignb %d\n" : "\talign %d\n", SizeOfWord);
 }
 
 STATIC
@@ -184,13 +162,13 @@ void GenLabel(char* Label, int Static)
 {
   if (UseLeadingUnderscores)
   {
-    if (OutputFormat != FormatFlat && !Static && GenExterns)
+    if (!Static && GenExterns)
       printf2("\tglobal\t_%s\n", Label);
     printf2("_%s:\n", Label);
   }
   else
   {
-    if (OutputFormat != FormatFlat && !Static && GenExterns)
+    if (!Static && GenExterns)
       printf2("\tglobal\t$%s\n", Label);
     printf2("$%s:\n", Label);
   }
@@ -235,9 +213,9 @@ void GenPrintNumLabel(int label)
 }
 
 STATIC
-void GenZeroData(unsigned Size)
+void GenZeroData(unsigned Size, int bss)
 {
-  printf2("\ttimes\t%u db 0\n", truncUint(Size));
+  printf2(bss ? "\tresb\t%u\n" : "\ttimes\t%u db 0\n", truncUint(Size));
 }
 
 STATIC
@@ -269,7 +247,7 @@ void GenAddrData(int Size, char* Label, int ofs)
   {
     int lab = LabelCnt++;
     printf2("section .relod\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-    puts2(DataHeader);
+    puts2(DataHeaderFooter[0]);
     GenNumLabel(lab);
   }
 #endif
@@ -287,6 +265,39 @@ void GenAddrData(int Size, char* Label, int ofs)
   puts2("");
   if (!isdigit(*Label))
     GenAddGlobal(Label, 2);
+}
+
+STATIC
+int GenFxnSizeNeeded(void)
+{
+#ifdef CAN_COMPILE_32BIT
+  return (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal) && GenExterns;
+#else
+  return 0;
+#endif
+}
+
+STATIC
+void GenRecordFxnSize(char* startLabelName, int endLabelNo)
+{
+  // In the huge mode(l) individual functions must each fit into a 64KB segment.
+  // A special non-allocated section, ".fxnsz", will hold function sizes and
+  // the linker will check them.
+#ifdef CAN_COMPILE_32BIT
+  // YASM unnecessarily warns when it sees the same section flags again, so
+  // generate them only once.
+  static int firstTime = 1;
+  printf2("section .fxnsz%s\n", firstTime ? " noalloc" : "");
+  firstTime = 0;
+  printf2("\tdd\t");
+  GenPrintNumLabel(endLabelNo);
+  printf2(" - ");
+  GenPrintLabel(startLabelName);
+  puts2("\n");
+#else
+  (void)startLabelName;
+  (void)endLabelNo;
+#endif
 }
 
 #define X86InstrMov    0x00
@@ -371,9 +382,13 @@ void GenPrintInstr(int instr, int val)
 
   switch (instr)
   {
-  case X86InstrLeave: p = (OutputFormat != FormatSegHuge) ? "leave" : "db\t0x66\n\tleave"; break;
+  case X86InstrLeave:
+    p = (OutputFormat != FormatSegHuge && OutputFormat != FormatSegUnreal) ? "leave" : "db\t0x66\n\tleave";
+    break;
 
-  case X86InstrRet: p = (OutputFormat != FormatSegHuge) ? "ret" : "retf"; break;
+  case X86InstrRet:
+    p = (OutputFormat != FormatSegHuge && OutputFormat != FormatSegUnreal) ? "ret" : "retf";
+    break;
 
   case X86InstrJcc:
     switch (val)
@@ -563,8 +578,10 @@ void GenPrintOperand(int op, int val)
 #ifdef CAN_COMPILE_32BIT
   else
   {
-    char* frame = (OutputFormat == FormatSegHuge) ? "bp" : "ebp";
+    char* frame = (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal) ? "bp" : "ebp";
+    char* stk = (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal) ? "sp" : "esp";
     char* base = (OutputFormat == FormatSegHuge) ? "si" : "ebx";
+    char* adrsz = (OutputFormat == FormatSegUnreal) ? "dword " : "";
     switch (op)
     {
     case X86OpRegAByte: printf2("al"); break;
@@ -577,14 +594,14 @@ void GenPrintOperand(int op, int val)
     case X86OpRegAHalfWord: printf2("ax"); break;
     case X86OpRegCHalfWord: printf2("cx"); break;
     case X86OpRegBpWord: printf2("ebp"); break;
-    case X86OpRegSpWord: printf2("esp"); break;
+    case X86OpRegSpWord: printf2(stk); break;
     case X86OpConst: printf2("%d", truncInt(val)); break;
     case X86OpLabel: GenPrintLabel(IdentTable + val); break;
     case X86OpNumLabel: GenPrintNumLabel(val); break;
-    case X86OpIndLabel: printf2("["); GenPrintLabel(IdentTable + val); printf2("]"); break;
-    case X86OpIndLabelExplicitByte: printf2("byte ["); GenPrintLabel(IdentTable + val); printf2("]"); break;
-    case X86OpIndLabelExplicitWord: printf2("dword ["); GenPrintLabel(IdentTable + val); printf2("]"); break;
-    case X86OpIndLabelExplicitHalfWord: printf2("word ["); GenPrintLabel(IdentTable + val); printf2("]"); break;
+    case X86OpIndLabel: printf2("[%s", adrsz); GenPrintLabel(IdentTable + val); printf2("]"); break;
+    case X86OpIndLabelExplicitByte: printf2("byte [%s", adrsz); GenPrintLabel(IdentTable + val); printf2("]"); break;
+    case X86OpIndLabelExplicitWord: printf2("dword [%s", adrsz); GenPrintLabel(IdentTable + val); printf2("]"); break;
+    case X86OpIndLabelExplicitHalfWord: printf2("word [%s", adrsz); GenPrintLabel(IdentTable + val); printf2("]"); break;
     case X86OpIndLocal: printf2("[%s%+d]", frame, truncInt(val)); break;
     case X86OpIndLocalExplicitByte: printf2("byte [%s%+d]", frame, truncInt(val)); break;
     case X86OpIndLocalExplicitWord: printf2("dword [%s%+d]", frame, truncInt(val)); break;
@@ -630,7 +647,7 @@ STATIC
 void GenPrintInstr1Operand(int instr, int instrval, int operand, int operandval)
 {
 #ifdef CAN_COMPILE_32BIT
-  if (OutputFormat == FormatSegHuge && instr == X86InstrPush)
+  if (instr == X86InstrPush && (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal))
   {
     if (operand == X86OpConst)
     {
@@ -639,12 +656,19 @@ void GenPrintInstr1Operand(int instr, int instrval, int operand, int operandval)
     }
     else if (operand == X86OpLabel)
     {
-      int lab = LabelCnt++;
-      printf2("section .relod\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-      puts2(CodeHeader);
-      puts2("\tdb\t0x66, 0x68"); // push dword const
-      GenNumLabel(lab);
-      printf2("\tdd\t"); GenPrintLabel(IdentTable + operandval); puts2("");
+      if (OutputFormat == FormatSegHuge)
+      {
+        int lab = LabelCnt++;
+        printf2("section .relod\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
+        puts2(CodeHeaderFooter[0]);
+        puts2("\tdb\t0x66, 0x68"); // push dword const
+        GenNumLabel(lab);
+        printf2("\tdd\t"); GenPrintLabel(IdentTable + operandval); puts2("");
+      }
+      else
+      {
+        printf2("\tpush\tdword "); GenPrintLabel(IdentTable + operandval); puts2("");
+      }
       return;
     }
   }
@@ -663,7 +687,7 @@ void GenPrintInstr2Operands(int instr, int instrval, int operand1, int operand1v
     return;
 
 #ifdef CAN_COMPILE_32BIT
-  if (OutputFormat == FormatSegHuge)
+  if (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
   {
     if (instr == X86InstrLea)
     {
@@ -684,13 +708,13 @@ void GenPrintInstr2Operands(int instr, int instrval, int operand1, int operand1v
       }
       errorInternal(106);
     }
-    if (instr == X86InstrMov)
+    if (instr == X86InstrMov && OutputFormat == FormatSegHuge)
     {
       if (operand1 == X86OpRegAWord && operand2 == X86OpLabel)
       {
         int lab = LabelCnt++;
         printf2("section .relod\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-        puts2(CodeHeader);
+        puts2(CodeHeaderFooter[0]);
         puts2("\tdb\t0x66, 0xB8"); // mov eax, const
         GenNumLabel(lab);
         printf2("\tdd\t"); GenPrintLabel(IdentTable + operand2val); puts2("");
@@ -778,7 +802,6 @@ void GenJumpUncond(int label)
                         X86OpNumLabel, label);
 }
 
-#ifndef USE_SWITCH_TAB
 STATIC
 void GenJumpIfEqual(int val, int label)
 {
@@ -788,7 +811,6 @@ void GenJumpIfEqual(int val, int label)
   GenPrintInstr1Operand(X86InstrJcc, tokEQ,
                         X86OpNumLabel, label);
 }
-#endif
 
 STATIC
 void GenJumpIfZero(int label)
@@ -816,45 +838,73 @@ void GenJumpIfNotZero(int label)
                         X86OpNumLabel, label);
 }
 
+fpos_t GenPrologPos;
+
+STATIC
+void GenWriteFrameSize(void)
+{
+  unsigned size = -CurFxnMinLocalOfs;
+  int pfx = size ? ' ' : ';';
+#ifdef CAN_COMPILE_32BIT
+  if (SizeOfWord == 4 &&
+      OutputFormat != FormatSegHuge &&
+      OutputFormat != FormatSegUnreal &&
+      WindowsStack)
+  {
+    int pfx = (size >= 4096) ? ' ' : ';';
+    // When targeting Windows, call equivalent of _chkstk() to
+    // correctly grow the stack page by page by probing it
+    if (!WinChkStkLabel)
+      WinChkStkLabel = -LabelCnt++; // reserve a label for _chkstk() and mark unused
+    if (WinChkStkLabel < 0 && pfx == ' ')
+      WinChkStkLabel = -WinChkStkLabel; // _chkstk() has been used at least once
+
+    printf2("\t%cmov\teax, %10u\n", pfx, size); // 10 chars are enough for 32-bit unsigned ints
+    printf2("\t%ccall\t", pfx);
+    GenPrintNumLabel((WinChkStkLabel < 0) ? -WinChkStkLabel : WinChkStkLabel);
+    puts2("");
+  }
+#endif
+  if (SizeOfWord == 2 || OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
+    printf2("\t%csub\tsp, %10u\n", pfx, size); // 10 chars are enough for 32-bit unsigned ints
+#ifdef CAN_COMPILE_32BIT
+  else
+    printf2("\t%csub\tesp, %10u\n", pfx, size); // 10 chars are enough for 32-bit unsigned ints
+#endif
+}
+
+STATIC
+void GenUpdateFrameSize(void)
+{
+  fpos_t pos;
+  fgetpos(OutFile, &pos);
+  fsetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
+  fsetpos(OutFile, &pos);
+}
+
 STATIC
 void GenFxnProlog(void)
 {
   GenPrintInstr1Operand(X86InstrPush, 0,
                         X86OpRegBpWord, 0);
-  GenPrintInstr2Operands(X86InstrMov, 0,
-                         X86OpRegBpWord, 0,
-                         X86OpRegSpWord, 0);
+#ifdef CAN_COMPILE_32BIT
+  if (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
+    puts2("\tmovzx\tebp, sp");
+  else
+#endif
+    GenPrintInstr2Operands(X86InstrMov, 0,
+                           X86OpRegBpWord, 0,
+                           X86OpRegSpWord, 0);
+  fgetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
 }
 
 STATIC
-void GenLocalAlloc(int size)
+void GenGrowStack(int size)
 {
-#ifdef CAN_COMPILE_32BIT
-  if (SizeOfWord == 4 &&
-      OutputFormat != FormatSegHuge &&
-      WindowsStack &&
-      size >= 4096)
-  {
-    // When targeting Windows, call equivalent of _chkstk() to
-    // correctly grow the stack page by page by probing it
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof WinChkStkLabel) / 3];
-    char *p = s + sizeof s;
-
-    if (!WinChkStkLabel)
-      WinChkStkLabel = LabelCnt++;
-
-    GenPrintInstr2Operands(X86InstrMov, 0,
-                           X86OpRegAWord, 0,
-                           X86OpConst, size);
-    *--p = '\0';
-    p = lab2str(p, WinChkStkLabel);
-    *--p = '_';
-    *--p = '_';
-    printf2("\tcall\t");
-    GenPrintLabel(p);
-    puts2("");
-  }
-#endif
+  if (!size)
+    return;
   GenPrintInstr2Operands(X86InstrSub, 0,
                          X86OpRegSpWord, 0,
                          X86OpConst, size);
@@ -863,8 +913,19 @@ void GenLocalAlloc(int size)
 STATIC
 void GenFxnEpilog(void)
 {
+  GenUpdateFrameSize();
   GenPrintInstrNoOperand(X86InstrLeave);
   GenPrintInstrNoOperand(X86InstrRet);
+}
+
+STATIC
+int GenMaxLocalsSize(void)
+{
+#ifdef CAN_COMPILE_32BIT
+  if (SizeOfWord == 4 && OutputFormat != FormatSegHuge && OutputFormat != FormatSegUnreal)
+    return 0x7FFFFFFF;
+#endif
+  return 0x7FFF;
 }
 
 #ifdef CAN_COMPILE_32BIT
@@ -903,8 +964,11 @@ void GenIsrProlog(void)
 
   // The context has been saved
 
-  puts2("\txor\teax, eax\n\tmov\tax, ss"); // mov r32, sreg leaves top 16 bits undefined on pre-Pentium CPUs
-  puts2("\txor\tebx, ebx\n\tmov\tbx, sp"); // top 16 bits of esp can contain garbage as well
+  puts2("\txor\teax, eax");
+  if (OutputFormat == FormatSegUnreal)
+    puts2("\tmov\tds, ax\n\tmov\tes, ax");
+  puts2("\tmov\tax, ss"); // mov r32, sreg leaves top 16 bits undefined on pre-Pentium CPUs
+  puts2("\tmovzx\tebx, sp"); // top 16 bits of esp can contain garbage as well
   puts2("\tshl\teax, 4\n\tadd\teax, ebx");
   puts2("\tpush\teax"); // pointer to the structure with register values
   puts2("\tsub\teax, 4\n\tpush\teax"); // pointer to the pointer to the structure with register values
@@ -912,11 +976,14 @@ void GenIsrProlog(void)
   puts2("\tpush\teax"); // fake return address allowing to use the existing bp-relative addressing of locals and params
 
   puts2("\tpush\tebp\n"
-        "\tmov\tebp, esp");
+        "\tmovzx\tebp, sp");
+  fgetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
 }
 
 void GenIsrEpilog(void)
 {
+  GenUpdateFrameSize();
   puts2("\tdb\t0x66\n\tleave");
 
   puts2("\tpop\teax"); // fake return address
@@ -1776,7 +1843,7 @@ void GenExpr1(void)
   int s = sp - 1;
   int i;
 
-  if (stack[s][0] == tokIf || stack[s][0] == tokIfNot)
+  if (stack[s][0] == tokIf || stack[s][0] == tokIfNot || stack[s][0] == tokReturn)
     s--;
   GenFuse(&s);
 
@@ -1852,6 +1919,8 @@ void GenExpr1(void)
       break;
     case tokIfNot:
       printf2("IF!");
+      break;
+    case tokReturn:
       break;
     default:
       printf2("%s", GetTokenName(tok));
@@ -2619,12 +2688,12 @@ void GenExpr1(void)
       if (stack[i - 1][0] == tokIdent)
       {
 #ifdef CAN_COMPILE_32BIT
-        if (OutputFormat == FormatSegHuge)
+        if (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
         {
           int lab = LabelCnt++;
           puts2("\tdb\t0x9A"); // call far seg:ofs
           printf2("section .relot\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-          puts2(CodeHeader);
+          puts2(CodeHeaderFooter[0]);
           GenNumLabel(lab);
           printf2("\tdd\t"); GenPrintLabel(IdentTable + stack[i - 1][1]); puts2("");
         }
@@ -2636,16 +2705,18 @@ void GenExpr1(void)
       else
       {
 #ifdef CAN_COMPILE_32BIT
-        if (OutputFormat == FormatSegHuge)
+        if (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
         {
+          // TBD??? replace this call with "push cs" + "call near16 $+3" and reduce .text and .relot size.
           int lab = (LabelCnt += 3) - 3;
           puts2("\tdb\t0x9A"); // call far seg:ofs (only to generate return address)
           printf2("section .relot\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-          puts2(CodeHeader);
+          puts2(CodeHeaderFooter[0]);
           GenNumLabel(lab);
           printf2("\tdd\t"); GenPrintNumLabel(lab + 1); puts2("");
           GenNumLabel(lab + 1);
-          printf2("\tadd\tword [esp], "); GenPrintNumLabel(lab + 2); printf2(" - "); GenPrintNumLabel(lab + 1); puts2(""); // adjust return address
+          puts2("\tmov\tsi, sp");
+          printf2("\tadd\tword [ss:si], "); GenPrintNumLabel(lab + 2); printf2(" - "); GenPrintNumLabel(lab + 1); puts2(""); // adjust return address
           puts2("\tshl\teax, 12\n\trol\tax, 4\n\tpush\teax\n\tretf");
           GenNumLabel(lab + 2);
         }
@@ -2654,13 +2725,13 @@ void GenExpr1(void)
           GenPrintInstr1Operand(X86InstrCall, 0,
                                 X86OpRegAWord, 0);
       }
-      if (v)
-        GenLocalAlloc(-v);
+      GenGrowStack(-v);
       break;
 
     case '(':
     case tokIf:
     case tokIfNot:
+    case tokReturn:
       break;
 
     case tokVoid:
@@ -2702,7 +2773,7 @@ void GenExpr0(void)
     case tokGoto: printf2("; sh-circ-goto "); break;
     case tokLogAnd: printf2("; short-circuit && target\n"); break;
     case tokLogOr: printf2("; short-circuit || target\n"); break;
-    case tokIf: case tokIfNot: break;
+    case tokIf: case tokIfNot: case tokReturn: break;
     default: printf2("; %s\n", GetTokenName(tok)); break;
     }
 #endif
@@ -2742,16 +2813,18 @@ void GenExpr0(void)
 
     case ')':
 #ifdef CAN_COMPILE_32BIT
-      if (OutputFormat == FormatSegHuge)
+      if (OutputFormat == FormatSegHuge || OutputFormat == FormatSegUnreal)
       {
+        // TBD??? replace this call with "push cs" + "call near16 $+3" and reduce .text and .relot size.
         int lab = (LabelCnt += 3) - 3;
         puts2("\tdb\t0x9A"); // call far seg:ofs (only to generate return address)
         printf2("section .relot\n\tdd\t"); GenPrintNumLabel(lab); puts2("");
-        puts2(CodeHeader);
+        puts2(CodeHeaderFooter[0]);
         GenNumLabel(lab);
         printf2("\tdd\t"); GenPrintNumLabel(lab + 1); puts2("");
         GenNumLabel(lab + 1);
-        printf2("\tadd\tword [esp], "); GenPrintNumLabel(lab + 2); printf2(" - "); GenPrintNumLabel(lab + 1); puts2(""); // adjust return address
+        puts2("\tmov\tsi, sp");
+        printf2("\tadd\tword [ss:si], "); GenPrintNumLabel(lab + 2); printf2(" - "); GenPrintNumLabel(lab + 1); puts2(""); // adjust return address
         puts2("\tshl\teax, 12\n\trol\tax, 4\n\tpush\teax\n\tretf");
         GenNumLabel(lab + 2);
       }
@@ -2759,8 +2832,7 @@ void GenExpr0(void)
 #endif
         GenPrintInstr1Operand(X86InstrCall, 0,
                               X86OpRegAWord, 0);
-      if (v)
-        GenLocalAlloc(-v);
+      GenGrowStack(-v);
       break;
 
     case tokUnaryStar:
@@ -2979,12 +3051,16 @@ void GenExpr0(void)
         GenPrintInstr2Operands(X86InstrMov, 0,
                                X86OpRegCWord, 0,
                                X86OpRegAWord, 0);
-        GenPrintInstr2Operands(instr, 0,
-                               GenSelectByteOrWord(X86OpIndRegBExplicitByteOrWord, v), 0,
-                               X86OpRegCByte, 0);
         GenPrintInstr2Operands(X86InstrMov, 0,
                                GenSelectByteOrWord(X86OpRegAByteOrWord, v), 0,
                                X86OpIndRegB, 0);
+        GenExtendRegAIfNeeded(v);
+        GenPrintInstr2Operands(instr, 0,
+                               X86OpRegAWord, 0,
+                               X86OpRegCByte, 0);
+        GenPrintInstr2Operands(X86InstrMov, 0,
+                               X86OpIndRegB, 0,
+                               GenSelectByteOrWord(X86OpRegAByteOrWord, v), 0);
         GenExtendRegAIfNeeded(v);
       }
       break;
@@ -3050,6 +3126,18 @@ void GenExpr0(void)
                              X86OpRegAWord, 0,
                              X86OpConst, 0xFF);
       break;
+#ifdef CAN_COMPILE_32BIT
+    case tokShort:
+      GenPrintInstr2Operands(X86InstrMovSx, 0,
+                             X86OpRegAWord, 0,
+                             X86OpRegAHalfWord, 0);
+      break;
+    case tokUShort:
+      GenPrintInstr2Operands(X86InstrMovZx, 0,
+                             X86OpRegAWord, 0,
+                             X86OpRegAHalfWord, 0);
+      break;
+#endif
 
     case tokShortCirc:
 #ifndef NO_ANNOTATIONS
@@ -3083,6 +3171,7 @@ void GenExpr0(void)
     case tokComma:
     case ',':
     case '(':
+    case tokReturn:
       break;
 
     case tokIf:
@@ -3102,126 +3191,60 @@ void GenExpr0(void)
 #endif // #ifndef CG_STACK_BASED
 
 STATIC
-unsigned GenStrData(int generatingCode, unsigned requiredLen)
+void GenDumpChar(int ch)
 {
-  int i;
-  unsigned total = 0;
+  static int quot = 0;
 
-  // insert string literals into the code
-  for (i = 0; i < sp; i++)
+  if (ch < 0)
   {
-    int tok = stack[i][0];
-    char* p = IdentTable + stack[i][1];
-    if (tok == tokIdent && isdigit(*p))
+    if (quot)
     {
-      int label = atoi(p);
-      int quot = 0;
-      unsigned len;
-
-      p = FindString(label);
-      len = *p++ & 0xFF;
-
-      // If this is a string literal initializing an array of char,
-      // truncate or pad it as necessary.
-      if (requiredLen)
-      {
-        if (len >= requiredLen)
-        {
-          len = requiredLen; // copy count
-          requiredLen = 0; // count to be zeroed out
-        }
-        else
-        {
-          requiredLen -= len; // count to be zeroed out
-        }
-      }
-      // Also, calculate its real size for incompletely typed arrays.
-      total = len + requiredLen;
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenJumpUncond(label + 1);
-        }
-        else
-        {
-          puts2(CodeFooter);
-          puts2(DataHeader);
-        }
-      }
-
-      GenNumLabel(label);
-
-      GenStartAsciiString();
-      while (len--)
-      {
-        // quote ASCII chars for better readability
-        if (*p >= 0x20 && *p <= 0x7E && *p != '\"')
-        {
-          if (!quot)
-          {
-            quot = 1;
-            printf2("\"");
-          }
-          printf2("%c", *p);
-        }
-        else
-        {
-          if (quot)
-          {
-            quot = 0;
-            printf2("\",");
-          }
-          printf2("%u", *p & 0xFFu);
-          if (len || requiredLen)
-            printf2(",");
-        }
-        p++;
-      }
-      if (quot)
-      {
-        printf2("\"");
-        if (requiredLen)
-          printf2(",");
-      }
-      while (requiredLen)
-      {
-        printf2("0");
-        if (--requiredLen)
-          printf2(",");
-      }
-      puts2("");
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenNumLabel(label + 1);
-        }
-        else
-        {
-          puts2(DataFooter);
-          puts2(CodeHeader);
-        }
-      }
+      printf2("\"");
+      quot = 0;
     }
+    if (TokenStringLen)
+      printf2("\n");
+    return;
   }
 
-  return total;
+  if (TokenStringLen == 0)
+    GenStartAsciiString();
+
+  // quote ASCII chars for better readability
+  if (ch >= 0x20 && ch <= 0x7E && ch != '"')
+  {
+    if (!quot)
+    {
+      quot = 1;
+      if (TokenStringLen)
+        printf2(",");
+      printf2("\"");
+    }
+    printf2("%c", ch);
+  }
+  else
+  {
+    if (quot)
+    {
+      quot = 0;
+      printf2("\"");
+    }
+    if (TokenStringLen)
+      printf2(",");
+    printf2("%u", ch & 0xFFu);
+  }
 }
 
 STATIC
 void GenExpr(void)
 {
-  if (OutputFormat != FormatFlat && GenExterns)
+  if (GenExterns)
   {
     int i;
     for (i = 0; i < sp; i++)
       if (stack[i][0] == tokIdent && !isdigit(IdentTable[stack[i][1]]))
         GenAddGlobal(IdentTable + stack[i][1], 2);
   }
-  GenStrData(1, 0);
 #ifndef CG_STACK_BASED
   GenExpr1();
 #else
@@ -3234,18 +3257,10 @@ void GenFin(void)
 {
   if (StructCpyLabel)
   {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof StructCpyLabel) / 3];
-    char *p = s + sizeof s;
+    puts2(CodeHeaderFooter[0]);
 
-    *--p = '\0';
-    p = lab2str(p, StructCpyLabel);
-    *--p = '_';
-    *--p = '_';
-
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
+    GenNumLabel(StructCpyLabel);
+    CurFxnMinLocalOfs = 0;
     GenFxnProlog();
 
     if (SizeOfWord == 2)
@@ -3258,28 +3273,19 @@ void GenFin(void)
             "\tmov\tax, [bp+8]");
     }
 #ifdef CAN_COMPILE_32BIT
-    else if (OutputFormat != FormatSegHuge)
-    {
-      puts2("\tmov\tedi, [ebp+16]\n"
-            "\tmov\tesi, [ebp+12]\n"
-            "\tmov\tecx, [ebp+8]\n"
-            "\tcld\n"
-            "\trep\tmovsb\n"
-            "\tmov\teax, [ebp+16]");
-    }
-    else
+    else if (OutputFormat == FormatSegHuge)
     {
       int lbl = (LabelCnt += 2) - 2;
 
-      puts2("\tmov\tedi, [ebp+16]\n"
+      puts2("\tmov\tedi, [bp+16]\n"
             "\tror\tedi, 4\n"
             "\tmov\tes, di\n"
             "\tshr\tedi, 28\n"
-            "\tmov\tesi, [ebp+12]\n"
+            "\tmov\tesi, [bp+12]\n"
             "\tror\tesi, 4\n"
             "\tmov\tds, si\n"
             "\tshr\tesi, 28");
-      puts2("\tmov\tebx, [ebp+8]\n"
+      puts2("\tmov\tebx, [bp+8]\n"
             "\tcld");
 
       GenNumLabel(lbl); // L1:
@@ -3308,141 +3314,166 @@ void GenFin(void)
 
       puts2("\tmov\tcx, bx\n"
             "\trep\tmovsb\n"
+            "\tmov\teax, [bp+16]");
+    }
+    else if (OutputFormat == FormatSegUnreal)
+    {
+      puts2("\tmov\tedi, [bp+16]\n"
+            "\tmov\tesi, [bp+12]\n"
+            "\tmov\tecx, [bp+8]\n"
+            "\tcld\n"
+            "\tdb\t0x67\n"
+            "\trep\tmovsb\n"
+            "\tmov\teax, [bp+16]");
+    }
+    else
+    {
+      puts2("\tmov\tedi, [ebp+16]\n"
+            "\tmov\tesi, [ebp+12]\n"
+            "\tmov\tecx, [ebp+8]\n"
+            "\tcld\n"
+            "\trep\tmovsb\n"
             "\tmov\teax, [ebp+16]");
     }
 #endif
 
     GenFxnEpilog();
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
 
-#ifdef USE_SWITCH_TAB
-  if (SwitchJmpLabel)
+#ifndef NO_STRUCT_BY_VAL
+  if (StructPushLabel)
   {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof SwitchJmpLabel) / 3];
-    char *p = s + sizeof s;
+    puts2(CodeHeaderFooter[0]);
 
-    *--p = '\0';
-    p = lab2str(p, SwitchJmpLabel);
-    *--p = '_';
-    *--p = '_';
-
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
+    GenNumLabel(StructPushLabel);
+    CurFxnMinLocalOfs = 0;
     GenFxnProlog();
 
     if (SizeOfWord == 2)
     {
-      int lbl = (LabelCnt += 3) - 3;
-      puts2("\tmov\tbx, [bp + 4]\n"
-            "\tmov\tsi, [bx + 2]\n"
-            "\tmov\tcx, [bx]");
-      printf2("\tjcxz\t"); GenPrintNumLabel(lbl + 2); // jcxz L3
-      puts2("\n\tmov\tax, [bp + 6]");
-      GenNumLabel(lbl); // L1:
-      puts2("\tadd\tbx, 4\n"
-            "\tcmp\tax, [bx]");
-      printf2("\tjne\t"); GenPrintNumLabel(lbl + 1); // jne L2
-      puts2("\n\tmov\tsi, [bx + 2]");
-      printf2("\tjmp\t"); GenPrintNumLabel(lbl + 2); // jmp L3
-      puts2("");
-      GenNumLabel(lbl + 1); // L2:
-      printf2("\tloop\t"); GenPrintNumLabel(lbl); // loop L1
-      puts2("");
-      GenNumLabel(lbl + 2); // L3:
-      puts2("\tmov\t[bp + 2], si\n"
-            "\tleave\n"
-            "\tret\t4");
+      puts2("\tmov\tdx, [bp+2]\n" // dx = return address
+            "\tmov\tsi, [bp+4]\n" // si = &struct
+            "\tmov\tcx, [bp+6]\n" // cx = sizeof(struct)
+            "\tmov\tbp, [bp]\n"   // restore bp
+
+            "\tmov\tax, cx\n"  // ax = sizeof(struct)
+            "\tinc\tax\n"      // ax = sizeof(struct) + 1
+            "\tand\tax, -2\n"  // ax = sizeof(struct) rounded up to multiple of 2 bytes
+            "\tadd\tsp, 4*2\n" // remove bp, return address and 2 args from stack
+            "\tsub\tsp, ax");  // allocate stack space for struct
+
+      puts2("\tmov\tdi, sp\n" // di = where struct should be copied to
+            "\tcld\n"
+            "\trep\tmovsb\n"  // copy
+
+            "\tpop\tax\n"  // return first 2 bytes of struct in ax
+            "\tpush\tax\n"
+            "\tpush\tbyte 0\n"  // caller will remove this 0 and first 2 bytes of struct from stack (as 2 args)
+            "\tpush\tdx\n" //   and then it will push ax (first 2 bytes of struct) back
+            "\tret");      // actually return to return address saved in dx
     }
 #ifdef CAN_COMPILE_32BIT
-    else if (OutputFormat != FormatSegHuge)
+    else if (OutputFormat == FormatSegHuge)
     {
-      int lbl = (LabelCnt += 3) - 3;
-      puts2("\tmov\tebx, [ebp + 8]\n"
-            "\tmov\tesi, [ebx + 4]\n"
-            "\tmov\tecx, [ebx]");
-      printf2("\tjecxz\t"); GenPrintNumLabel(lbl + 2); // jecxz L3
-      puts2("\n\tmov\teax, [ebp + 12]");
-      GenNumLabel(lbl); // L1:
-      puts2("\tadd\tebx, 8\n"
-            "\tcmp\teax, [ebx]");
-      printf2("\tjne\t"); GenPrintNumLabel(lbl + 1); // jne L2
-      puts2("\n\tmov\tesi, [ebx + 4]");
-      printf2("\tjmp\t"); GenPrintNumLabel(lbl + 2); // jmp L3
-      puts2("");
-      GenNumLabel(lbl + 1); // L2:
-      printf2("\tloop\t"); GenPrintNumLabel(lbl); // loop L1
-      puts2("");
-      GenNumLabel(lbl + 2); // L3:
-      puts2("\tmov\t[ebp + 4], esi\n"
-            "\tleave\n"
-            "\tret\t8");
+      puts2("\tmov\tedx, [bp+4]\n"   // edx = return address (seg:ofs)
+            "\tmov\tesi, [bp+8]\n"   // esi = &struct (phys)
+            "\tror\tesi, 4\n"
+            "\tmov\tds, si\n"
+            "\tshr\tesi, 28\n"       // ds:si = &struct (seg:ofs)
+            "\tmov\tecx, [bp+12]\n"  // ecx = sizeof(struct)
+            "\tmov\tebp, [bp]\n"     // restore ebp
+
+            "\tlea\teax, [ecx + 3]\n" // eax = sizeof(struct) + 3
+            "\tand\teax, -4\n"        // eax = sizeof(struct) rounded up to multiple of 4 bytes
+            "\tsub\tax, 4*4\n"        // remove ebp, return address and 2 args from stack
+            "\tsub\tsp, ax\n"         // allocate stack space for struct
+
+            "\tmov\tax, ss\n"
+            "\tmov\tes, ax\n" // es = ss
+            "\tmov\tdi, sp\n" // es:di = where struct should be copied to (seg:ofs)
+            "\tcld\n"
+            "\trep\tmovsb\n"  // copy; limit to ~64KB since stack size itself is ~64KB max
+
+            "\tpop\teax\n"  // return first 4 bytes of struct in eax
+            "\tpush\teax\n"
+            "\tpush\teax\n" // caller will remove this and first 4 bytes of struct from stack (as 2 args)
+            "\tpush\tedx\n" //   and then it will push eax (first 4 bytes of struct) back
+            "\tretf");      // actually return to return address saved in edx
+    }
+    else if (OutputFormat == FormatSegUnreal)
+    {
+      puts2("\tmov\tedx, [bp+4]\n"   // edx = return address
+            "\tmov\tesi, [bp+8]\n"   // esi = &struct
+            "\tmov\tecx, [bp+12]\n"  // ecx = sizeof(struct)
+            "\tmov\tebp, [bp]\n"     // restore ebp
+
+            "\tlea\teax, [ecx + 3]\n" // eax = sizeof(struct) + 3
+            "\tand\teax, -4\n"        // eax = sizeof(struct) rounded up to multiple of 4 bytes
+            "\tsub\tax, 4*4\n"        // remove ebp, return address and 2 args from stack
+            "\tsub\tsp, ax\n"         // allocate stack space for struct
+
+            "\tmov\tax, ss\n"
+            "\tmovzx\teax, ax\n"
+            "\tshl\teax, 4\n"
+            "\tmovzx\tedi, sp\n"
+            "\tadd\tedi, eax\n"       // edi = where struct should be copied to
+
+            "\tcld\n"
+            "\tdb\t0x67\n"
+            "\trep\tmovsb\n"      // copy
+
+            "\tpop\teax\n"        // return first 4 bytes of struct in eax
+            "\tpush\teax\n"
+            "\tpush\teax\n"       // caller will remove this and first 4 bytes of struct from stack (as 2 args)
+            "\tpush\tedx\n"       //   and then it will push eax (first 4 bytes of struct) back
+            "\tretf");            // actually return to return address saved in edx
     }
     else
     {
-      int lbl = (LabelCnt += 3) - 3;
-      puts2("\tmov\tebx, [bp + 8]\n"
-            "\tror\tebx, 4\n"
-            "\tmov\tds, ebx\n"
-            "\tshr\tebx, 28\n"
-            "\tmov\tsi, [bx + 4]\n"
-            "\tmov\tcx, [bx]"); // use only 16 bits of case counter
-      printf2("\tjcxz\t"); GenPrintNumLabel(lbl + 2); // jcxz L3
-      puts2("\n\tmov\teax, [bp + 12]");
-      GenNumLabel(lbl); // L1:
-      // No segment reload inside the loop, hence the number of cases is limited to ~8190
-      puts2("\tadd\tbx, 8\n"
-            "\tcmp\teax, [bx]");
-      printf2("\tjne\t"); GenPrintNumLabel(lbl + 1); // jne L2
-      puts2("\n\tmov\tsi, [bx + 4]");
-      printf2("\tjmp\t"); GenPrintNumLabel(lbl + 2); // jmp L3
-      puts2("");
-      GenNumLabel(lbl + 1); // L2:
-      printf2("\tloop\t"); GenPrintNumLabel(lbl); // loop L1
-      puts2("");
-      GenNumLabel(lbl + 2); // L3:
-      // Preserve CS on return
-      puts2("\tmov\tax, [bp + 6]\n"
-            "\tshl\tax, 4\n"
-            "\tsub\tsi, ax\n"
-            "\tmov\t[bp + 4], si\n"
-            "\tdb\t0x66\n"
-            "\tleave\n"
-            "\tretf\t8");
+      // Copying the pushed structure to the stack backwards
+      // (from higher to lower addresses) in order to correctly
+      // grow the stack on Windows, page by page
+      puts2("\tmov\tedx, [ebp+4]\n"  // edx = return address
+            "\tmov\tesi, [ebp+8]\n"  // esi = &struct
+            "\tmov\tecx, [ebp+12]\n" // ecx = sizeof(struct)
+            "\tmov\tebp, [ebp]\n"    // restore ebp
+
+            "\tlea\teax, [ecx + 3]\n" // eax = sizeof(struct) + 3
+            "\tand\teax, -4\n"        // eax = sizeof(struct) rounded up to multiple of 4 bytes
+            "\tsub\teax, 4*4\n"       // remove ebp, return address and 2 args from stack
+            "\tsub\tesp, eax\n"       // allocate stack space for struct
+
+            "\tlea\tesi, [esi + ecx - 1]\n" // esi = &last byte of struct
+            "\tlea\tedi, [esp + ecx - 1]\n" // edi = where it should be copied to
+            "\tstd\n"
+            "\trep\tmovsb\n"      // copy
+            "\tcld\n"
+
+            "\tmov\teax, [esp]\n" // return first 4 bytes of struct in eax
+            "\tpush\t0\n"         // caller will remove this 0 and first 4 bytes of struct from stack (as 2 args)
+            "\tpush\tedx\n"       //   and then it will push eax (first 4 bytes of struct) back
+            "\tret");             // actually return to return address saved in edx
     }
 #endif
 
-    // Not using GenFxnEpilog() here because we need to remove the parameters
-    // from the stack
 //    GenFxnEpilog();
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
 #endif
 
 #ifdef CAN_COMPILE_32BIT
-  if (WinChkStkLabel)
+  if (WinChkStkLabel > 0) // if _chkstk() has been used at least once
   {
     // When targeting Windows, simulate _chkstk() to
     // correctly grow the stack page by page by probing it
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof WinChkStkLabel) / 3];
-    char *p = s + sizeof s;
     int lbl = LabelCnt++;
 
-    *--p = '\0';
-    p = lab2str(p, WinChkStkLabel);
-    *--p = '_';
-    *--p = '_';
+    puts2(CodeHeaderFooter[0]);
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
+    GenNumLabel(WinChkStkLabel);
     puts2("\tlea\tebx, [esp+4]\n"
           "\tmov\tecx, ebx\n"
           "\tsub\tecx, eax\n"
@@ -3455,12 +3486,11 @@ void GenFin(void)
     printf2("\tjne\t"); GenPrintNumLabel(lbl); // jne L1
     puts2("\n\tret");
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
 #endif
 
-  if (OutputFormat != FormatFlat && GenExterns)
+  if (GenExterns)
   {
     int i = 0;
 

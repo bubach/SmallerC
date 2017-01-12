@@ -21,17 +21,13 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
 ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
 */
 
 /*****************************************************************************/
 /*                                                                           */
 /*                                Smaller C                                  */
 /*                                                                           */
-/*       A simple and small single-pass C compiler ("small C" class).        */
+/*                 A simple and small single-pass C compiler                 */
 /*                                                                           */
 /*                          TR3200 code generator                            */
 /*                                                                           */
@@ -43,8 +39,10 @@ void GenInit(void)
   // initialization of target-specific code generator
   SizeOfWord = 4;
   OutputFormat = FormatSegmented;
-  CodeHeader = "\t.text";
-  DataHeader = "\t.data";
+  CodeHeaderFooter[0] = "\tsection .text";
+  DataHeaderFooter[0] = "\tsection .data";
+  RoDataHeaderFooter[0] = "\tsection .rodata";
+  BssHeaderFooter[0] = "\tsection .bss";
 }
 
 STATIC
@@ -71,8 +69,9 @@ void GenStartCommentLine(void)
 }
 
 STATIC
-void GenWordAlignment(void)
+void GenWordAlignment(int bss)
 {
+  (void)bss;
   printf2("\t.align 2\n");
 }
 
@@ -80,7 +79,7 @@ STATIC
 void GenLabel(char* Label, int Static)
 {
   {
-    if (OutputFormat != FormatFlat && !Static && GenExterns)
+    if (!Static && GenExterns)
       printf2("\t.global\t_%s\n", Label);
     printf2("_%s:\n", Label);
   }
@@ -110,8 +109,9 @@ void GenPrintNumLabel(int label)
 }
 
 STATIC
-void GenZeroData(unsigned Size)
+void GenZeroData(unsigned Size, int bss)
 {
+  (void)bss;
   printf2("\t.fill\t%u\n", truncUint(Size));
 }
 
@@ -147,6 +147,19 @@ void GenAddrData(int Size, char* Label, int ofs)
   if (ofs)
     printf2(" %+d", ofs);
   puts2("");
+}
+
+STATIC
+int GenFxnSizeNeeded(void)
+{
+  return 0;
+}
+
+STATIC
+void GenRecordFxnSize(char* startLabelName, int endLabelNo)
+{
+  (void)startLabelName;
+  (void)endLabelNo;
 }
 
 #define Tr32InstrNop    0x00
@@ -389,8 +402,9 @@ void GenExtendRegIfNeeded(int reg, int opSz)
 {
   if (opSz == -1)
   {
-    GenPrintInstr1Operand(Tr32InstrSigxB, 0,
-                          reg, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxB, 0,
+                           reg, 0,
+                           reg, 0);
   }
   else if (opSz == 1)
   {
@@ -401,8 +415,9 @@ void GenExtendRegIfNeeded(int reg, int opSz)
   }
   else if (opSz == -2)
   {
-    GenPrintInstr1Operand(Tr32InstrSigxW, 0,
-                          reg, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxW, 0,
+                           reg, 0,
+                           reg, 0);
   }
   else if (opSz == 2)
   {
@@ -477,9 +492,17 @@ void GenSaveRestoreRegs(int save)
     rstart = Tr32OpRegFlags, rstop = Tr32OpReg0, rinc = -1;
 
   for (r = rstart; r != rstop; r += rinc)
-    if (mask & (1 << r))
-      GenPrintInstr1Operand(save ? Tr32InstrPush : Tr32InstrPop, 0,
-                            r, 0);
+  {
+    int used = (mask & (1 << r)) != 0;
+    if (save || used)
+    {
+      int pfx = used ? ' ' : ';';
+      printf2(save ? "\t%cpush\t" : "\t%cpop\t", pfx);
+      GenPrintOperand(r, 0);
+      GenPrintNewLine();
+    }
+  }
+  GenRegsUsed = mask; // undo changes in GenRegsUsed by GenPrintOperand()
 }
 
 void GenIsrProlog(void)
@@ -490,6 +513,27 @@ void GenIsrProlog(void)
 void GenIsrEpilog(void)
 {
   // TBD???
+}
+
+fpos_t GenPrologPos;
+
+STATIC
+void GenWriteFrameSize(void)
+{
+  unsigned size = -CurFxnMinLocalOfs;
+  int pfx = size ? ' ' : ';';
+  printf2("\t%csub\t%%sp, %%sp, %10u\n", pfx, size); // 10 chars are enough for 32-bit unsigned ints
+  GenSaveRestoreRegs(1);
+}
+
+STATIC
+void GenUpdateFrameSize(void)
+{
+  fpos_t pos;
+  fgetpos(OutFile, &pos);
+  fsetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
+  fsetpos(OutFile, &pos);
 }
 
 STATIC
@@ -503,29 +547,27 @@ void GenFxnProlog(void)
   GenPrintInstr2Operands(Tr32InstrMov, 0,
                          Tr32OpRegBp, 0,
                          Tr32OpRegSp, 0);
+
+  fgetpos(OutFile, &GenPrologPos);
+  GenWriteFrameSize();
 }
 
-int GenHack;
-
 STATIC
-void GenLocalAlloc(int size)
+void GenGrowStack(int size)
 {
-  // TBD!!! This is a hack.
-  if (size != -1)
-    GenPrintInstr3Operands(Tr32InstrSub, 0,
-                           Tr32OpRegSp, 0,
-                           Tr32OpRegSp, 0,
-                           Tr32OpConst, size);
-  if (GenHack)
-  {
-    GenSaveRestoreRegs(1);
-    GenHack = 0;
-  }
+  if (!size)
+    return;
+  GenPrintInstr3Operands(Tr32InstrSub, 0,
+                         Tr32OpRegSp, 0,
+                         Tr32OpRegSp, 0,
+                         Tr32OpConst, size);
 }
 
 STATIC
 void GenFxnEpilog(void)
 {
+  GenUpdateFrameSize();
+
   GenSaveRestoreRegs(0);
 
   GenPrintInstr2Operands(Tr32InstrMov, 0,
@@ -536,13 +578,12 @@ void GenFxnEpilog(void)
                         Tr32OpRegBp, 0);
 
   GenPrintInstrNoOperand(Tr32InstrRet, 0);
+}
 
-  // TBD!!! This is a hack.
-  // GenLocalAlloc(-CurFxnMinLocalOfs) will only be called after GenFxnEpilog()
-  // if CurFxnMinLocalOfs != 0. It needs to be called in order to save the used registers.
-  GenHack = 1;
-  if (!CurFxnMinLocalOfs)
-    CurFxnMinLocalOfs = 1;
+STATIC
+int GenMaxLocalsSize(void)
+{
+  return 0x7FFFFFFF;
 }
 
 STATIC
@@ -629,11 +670,13 @@ void GenReadIdent(int regDst, int opSz, int label)
                          Tr32OpLabel, label);
 
   if (opSz == -1)
-    GenPrintInstr1Operand(Tr32InstrSigxB, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxB, 0,
+                           regDst, 0,
+                           regDst, 0);
   else if (opSz == -2)
-    GenPrintInstr1Operand(Tr32InstrSigxW, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxW, 0,
+                           regDst, 0,
+                           regDst, 0);
 }
 
 STATIC
@@ -653,11 +696,13 @@ void GenReadLocal(int regDst, int opSz, int ofs)
                          Tr32OpIndRegBp, ofs);
 
   if (opSz == -1)
-    GenPrintInstr1Operand(Tr32InstrSigxB, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxB, 0,
+                           regDst, 0,
+                           regDst, 0);
   else if (opSz == -2)
-    GenPrintInstr1Operand(Tr32InstrSigxW, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxW, 0,
+                           regDst, 0,
+                           regDst, 0);
 }
 
 STATIC
@@ -677,11 +722,13 @@ void GenReadIndirect(int regDst, int regSrc, int opSz)
                          regSrc + Tr32OpIndReg0, 0);
 
   if (opSz == -1)
-    GenPrintInstr1Operand(Tr32InstrSigxB, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxB, 0,
+                           regDst, 0,
+                           regDst, 0);
   else if (opSz == -2)
-    GenPrintInstr1Operand(Tr32InstrSigxW, 0,
-                          regDst, 0);
+    GenPrintInstr2Operands(Tr32InstrSigxW, 0,
+                           regDst, 0,
+                           regDst, 0);
 }
 
 STATIC
@@ -977,7 +1024,7 @@ void GenPrep(int* idx)
         // Change unsigned division to right shift and unsigned modulo to bitwise and
         else if (tok == tokUMod || tok == tokAssignUMod)
         {
-          stack[oldIdxRight][1] = uint2int(m - 1);
+          stack[oldIdxRight][1] = (int)(m - 1);
           tok = (tok == tokUMod) ? '&' : tokAssignAnd;
         }
         else
@@ -1314,7 +1361,7 @@ void GenExpr0(void)
   int callDepth = 0;
   int t = sp - 1;
 
-  if (stack[t][0] == tokIf || stack[t][0] == tokIfNot)
+  if (stack[t][0] == tokIf || stack[t][0] == tokIfNot || stack[t][0] == tokReturn)
     t--;
   GenPrep(&t);
 
@@ -1353,7 +1400,7 @@ void GenExpr0(void)
     case tokGoto: printf2(" ; sh-circ-goto "); break;
     case tokLogAnd: printf2(" ; short-circuit && target\n"); break;
     case tokLogOr: printf2(" ; short-circuit || target\n"); break;
-    case tokIf: case tokIfNot: break;
+    case tokIf: case tokIfNot: case tokReturn: break;
     case tokRevMinus: printf2(" ; -r\n"); break;
     default: printf2(" ; %s\n", GetTokenName(tok)); break;
     }
@@ -1443,7 +1490,7 @@ void GenExpr0(void)
         GenPrintInstr1Operand(Tr32InstrCall, 0,
                               GenWreg, 0);
       }
-      GenLocalAlloc(-v);
+      GenGrowStack(-v);
       break;
 
     case tokUnaryStar:
@@ -1695,8 +1742,9 @@ void GenExpr0(void)
       break;
 
     case tokSChar:
-      GenPrintInstr1Operand(Tr32InstrSigxB, 0,
-                            GenWreg, 0);
+      GenPrintInstr2Operands(Tr32InstrSigxB, 0,
+                             GenWreg, 0,
+                             GenWreg, 0);
       break;
     case tokUChar:
       GenPrintInstr3Operands(Tr32InstrAnd, 0,
@@ -1705,8 +1753,9 @@ void GenExpr0(void)
                              Tr32OpConst, 0xFF);
       break;
     case tokShort:
-      GenPrintInstr1Operand(Tr32InstrSigxW, 0,
-                            GenWreg, 0);
+      GenPrintInstr2Operands(Tr32InstrSigxW, 0,
+                             GenWreg, 0,
+                             GenWreg, 0);
       break;
     case tokUShort:
       GenPrintInstr3Operands(Tr32InstrAnd, 0,
@@ -1747,6 +1796,7 @@ void GenExpr0(void)
     case tokRevIdent:
     case tokRevLocalOfs:
     case tokComma:
+    case tokReturn:
       break;
 
     case tokIf:
@@ -1768,103 +1818,53 @@ void GenExpr0(void)
 }
 
 STATIC
-unsigned GenStrData(int generatingCode, unsigned requiredLen)
+void GenDumpChar(int ch)
 {
-  int i;
-  unsigned total = 0;
+  static int quot = 0;
 
-  // insert string literals into the code
-  for (i = 0; i < sp; i++)
+  if (ch < 0)
   {
-    int tok = stack[i][0];
-    char* p = IdentTable + stack[i][1];
-    if (tok == tokIdent && isdigit(*p))
+    if (quot)
     {
-      int label = atoi(p);
-      unsigned len;
-
-      p = FindString(label);
-      len = *p++ & 0xFF;
-
-      // If this is a string literal initializing an array of char,
-      // truncate or pad it as necessary.
-      if (requiredLen)
-      {
-        if (len >= requiredLen)
-        {
-          len = requiredLen; // copy count
-          requiredLen = 0; // count to be zeroed out
-        }
-        else
-        {
-          requiredLen -= len; // count to be zeroed out
-        }
-      }
-      // Also, calculate its real size for incompletely typed arrays.
-      total = len + requiredLen;
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenJumpUncond(label + 1);
-        }
-        else
-        {
-          puts2(CodeFooter);
-          puts2(DataHeader);
-        }
-      }
-
-      GenNumLabel(label);
-
-      GenStartAsciiString();
       printf2("\"");
-      while (len--)
-      {
-        // quote ASCII chars for better readability
-        if (*p >= 0x20 && *p <= 0x7E)
-        {
-          if (*p == '\"' || *p == '\\')
-            printf2("\\");
-          printf2("%c", *p);
-        }
-        else
-        {
-          printf2("\\%03o", *p & 0xFFu);
-        }
-        p++;
-      }
-      while (requiredLen)
-      {
-        printf2("\\000");
-        requiredLen--;
-      }
-      printf2("\"");
-      puts2("");
-
-      if (generatingCode)
-      {
-        if (OutputFormat == FormatFlat)
-        {
-          GenNumLabel(label + 1);
-        }
-        else
-        {
-          puts2(DataFooter);
-          puts2(CodeHeader);
-        }
-      }
+      quot = 0;
     }
+    if (TokenStringLen)
+      printf2("\n");
+    return;
   }
 
-  return total;
+  if (TokenStringLen == 0)
+    GenStartAsciiString();
+
+  // quote ASCII chars for better readability
+  if (ch >= 0x20 && ch <= 0x7E && ch != '"')
+  {
+    if (!quot)
+    {
+      quot = 1;
+      if (TokenStringLen)
+        printf2(",");
+      printf2("\"");
+    }
+    printf2("%c", ch);
+  }
+  else
+  {
+    if (quot)
+    {
+      quot = 0;
+      printf2("\"");
+    }
+    if (TokenStringLen)
+      printf2(",");
+    printf2("%u", ch & 0xFFu);
+  }
 }
 
 STATIC
 void GenExpr(void)
 {
-  GenStrData(1, 0);
   GenExpr0();
 }
 
@@ -1873,19 +1873,11 @@ void GenFin(void)
 {
   if (StructCpyLabel)
   {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof StructCpyLabel) / 3];
-    char *p = s + sizeof s;
     int lbl = LabelCnt++;
 
-    *--p = '\0';
-    p = lab2str(p, StructCpyLabel);
-    *--p = '_';
-    *--p = '_';
+    puts2(CodeHeaderFooter[0]);
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
+    GenNumLabel(StructCpyLabel);
     puts2("\tpush\t%r1\n"
           "\tpush\t%r2\n"
           "\tpush\t%r3\n"
@@ -1907,50 +1899,6 @@ void GenFin(void)
           "\tpop\t%r1\n"
           "\tret");
 
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
+    puts2(CodeHeaderFooter[1]);
   }
-
-#ifdef USE_SWITCH_TAB
-  // TBD??? convert from MIPS??? USE_SWITCH_TAB isn't the default.
-  if (SwitchJmpLabel)
-  {
-    char s[1 + 2 + (2 + CHAR_BIT * sizeof SwitchJmpLabel) / 3];
-    char *p = s + sizeof s;
-    int lbl = (LabelCnt += 3) - 3;
-
-    *--p = '\0';
-    p = lab2str(p, SwitchJmpLabel);
-    *--p = '_';
-    *--p = '_';
-
-    if (OutputFormat != FormatFlat)
-      puts2(CodeHeader);
-
-    GenLabel(p, 1);
-
-    puts2("\tlw\t$2, 0($4)\n"
-          "\tlw\t$31, 4($4)");
-    printf2("\tbeq\t$2, $0, "); GenPrintNumLabel(lbl + 2); // beq $2, $0, L3
-    puts2("");
-    GenNumLabel(lbl); // L1:
-    puts2("\taddiu\t$4, $4, 8\n"
-          "\tlw\t$6, 0($4)");
-    printf2("\tbne\t$6, $5, "); GenPrintNumLabel(lbl + 1); // bne $6, $6, L2
-    puts2("");
-    puts2("\tlw\t$31, 4($4)");
-    printf2("\tj "); GenPrintNumLabel(lbl + 2); // j L3
-    puts2("");
-    GenNumLabel(lbl + 1); // L2:
-    puts2("\taddiu\t$2, $2, -1");
-    printf2("\tbne\t$2, $0, "); GenPrintNumLabel(lbl); // bne $2, $0, L1
-    puts2("");
-    GenNumLabel(lbl + 2); // L3:
-    puts2("\taddiu\t$29, $29, 16\n"
-          "\tj\t$31");
-
-    if (OutputFormat != FormatFlat)
-      puts2(CodeFooter);
-  }
-#endif
 }

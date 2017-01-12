@@ -1,16 +1,16 @@
 ; /*
-; Copyright (c) 2013, Alexey Frunze
+; Copyright (c) 2013-2015, Alexey Frunze
 ; All rights reserved.
-; 
+;
 ; Redistribution and use in source and binary forms, with or without
-; modification, are permitted provided that the following conditions are met: 
-; 
+; modification, are permitted provided that the following conditions are met:
+;
 ; 1. Redistributions of source code must retain the above copyright notice, this
-;    list of conditions and the following disclaimer. 
+;    list of conditions and the following disclaimer.
 ; 2. Redistributions in binary form must reproduce the above copyright notice,
 ;    this list of conditions and the following disclaimer in the documentation
-;    and/or other materials provided with the distribution. 
-; 
+;    and/or other materials provided with the distribution.
+;
 ; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 ; ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 ; WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -21,12 +21,8 @@
 ; ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 ; (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-; 
-; The views and conclusions contained in the software and documentation are those
-; of the authors and should not be interpreted as representing official policies, 
-; either expressed or implied, of the FreeBSD Project.
 ; */
-; 
+;
 ; /*****************************************************************************/
 ; /*                                                                           */
 ; /*                             minimal stdlibc                               */
@@ -34,10 +30,10 @@
 ; /*Just enough code for Smaller C to compile itself into a 16/32-bit DOS .EXE.*/
 ; /*                                                                           */
 ; /*****************************************************************************/
-; 
+;
 ; Compile:
-;   smlrc -huge -no-externs lb.c lb.asm
-;   smlrc -huge -no-externs -label 1001 smlrc.c smlrc.asm
+;   smlrc -nobss -huge -no-externs lb.c lb.asm
+;   smlrc -nobss -huge -no-externs -label 1001 smlrc.c smlrc.asm
 ;   nasm -f bin smlrchg.asm -o smlrchg.exe
 ;
 
@@ -45,11 +41,12 @@ bits 16
 org 0
 
 _text_size_      equ ((_text_end_ - _text_start_ + 3) & ~3)
+_rodata_size_    equ ((_rodata_end_ - _rodata_start_ + 3) & ~3)
 _data_size_      equ ((_data_end_ - _data_start_ + 3) & ~3)
 _relo_text_size_ equ ((_relo_text_end_ - _relo_text_start_ + 3) & ~3)
 _relo_data_size_ equ ((_relo_data_end_ - _relo_data_start_ + 3) & ~3)
 _stack_size_     equ ((_stack_end_ - _stack_start_ + 3) & ~3)
-_exe_size_       equ (_text_size_ + _data_size_ + _relo_text_size_ + _relo_data_size_ + _stack_size_)
+_exe_size_       equ (_text_size_ + _rodata_size_ + _data_size_ + _relo_text_size_ + _relo_data_size_ + _stack_size_)
 
 section .text align=4
 
@@ -146,6 +143,9 @@ relo_data_done:
     push    eax
     retf        ; __start__() will set up argc and argv for main() and call exit(main(argc, argv))
 
+section .rodata align=4
+_rodata_start_:
+
 section .data align=4
 _data_start_:
 
@@ -164,6 +164,9 @@ _relo_data_start_:
 
 section .text
 _text_end_:
+
+section .rodata
+_rodata_end_:
 
 section .data
 _data_end_:

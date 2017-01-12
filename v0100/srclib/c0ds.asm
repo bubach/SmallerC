@@ -1,10 +1,12 @@
 ;
-;  Copyright (c) 2014, Alexey Frunze
+;  Copyright (c) 2014-2015, Alexey Frunze
 ;  2-clause BSD license.
 ;
 bits 16
 
     extern ___start__
+    extern __start__bss
+    extern __stop__bss
 
 section .text
 
@@ -23,7 +25,24 @@ __start:
     mov ah, 0x4a
     mov bx, 4096
     int 0x21
+    jnc exe
+    ; .COM programs may receive less than 64KB of memory just as well, bail out if it's the case
+    mov ah, 0x40
+    mov bx, 2 ; stderr
+    mov dx, _64kbmsg
+    mov cx, _64kbmsg_end - _64kbmsg
+    int 0x21
+    jmp terminate
+
 exe:
+    ; Init .bss
+    mov di, __start__bss
+    mov cx, __stop__bss
+    sub cx, di
+    xor al, al
+    cld
+    rep stosb
+
     jmp ___start__ ; __start__() will set up argc and argv for main() and call exit(main(argc, argv))
 
     global ___getCS
@@ -103,7 +122,17 @@ ___CtrlCIsr:
     push 6
     call ___DosSetVect
 
+terminate:
     mov ax, 0x4c01
     int 0x21
+
 _excmsg db 13,10,"Unhandled exception!",13,10
 _excmsg_end:
+
+_64kbmsg db "Not enough memory!",13,10
+_64kbmsg_end:
+
+
+section .bss
+    ; .bss must exist for __start__bss and __stop__bss to also exist
+    resw    1

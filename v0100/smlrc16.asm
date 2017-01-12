@@ -1,16 +1,16 @@
 ; /*
-; Copyright (c) 2013, Alexey Frunze
+; Copyright (c) 2013-2015, Alexey Frunze
 ; All rights reserved.
-; 
+;
 ; Redistribution and use in source and binary forms, with or without
-; modification, are permitted provided that the following conditions are met: 
-; 
+; modification, are permitted provided that the following conditions are met:
+;
 ; 1. Redistributions of source code must retain the above copyright notice, this
-;    list of conditions and the following disclaimer. 
+;    list of conditions and the following disclaimer.
 ; 2. Redistributions in binary form must reproduce the above copyright notice,
 ;    this list of conditions and the following disclaimer in the documentation
-;    and/or other materials provided with the distribution. 
-; 
+;    and/or other materials provided with the distribution.
+;
 ; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 ; ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 ; WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -21,12 +21,8 @@
 ; ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 ; (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-; 
-; The views and conclusions contained in the software and documentation are those
-; of the authors and should not be interpreted as representing official policies, 
-; either expressed or implied, of the FreeBSD Project.
 ; */
-; 
+;
 ; /*****************************************************************************/
 ; /*                                                                           */
 ; /*                             minimal stdlibc                               */
@@ -34,10 +30,10 @@
 ; /*  Just enough code for Smaller C to compile itself into a 16-bit DOS .EXE. */
 ; /*                                                                           */
 ; /*****************************************************************************/
-; 
+;
 ; Compile:
-;   smlrc -seg16 -no-externs lb.c lb.asm
-;   smlrc -seg16 -no-externs -label 1001 smlrc.c smlrc.asm
+;   smlrc -nobss -seg16 -no-externs lb.c lb.asm
+;   smlrc -nobss -seg16 -no-externs -label 1001 smlrc.c smlrc.asm
 ;   nasm -f bin smlrc16.asm -o smlrc16.exe
 ; 
 
@@ -72,11 +68,14 @@ _exe_start_:
     mov es, ax
     jmp ___start__ ; __start__() will set up argc and argv for main() and call exit(main(argc, argv))
 
-section .data
+section .rodata
 
-; _data_start_: file offset = 0x10000, SP = file offset & 0xFFFF = 0
-_data_start_:
+; _rodata_start_: file offset = 0x10000, SP = file offset & 0xFFFF = 0
+_rodata_start_:
     db  "NULL" ; reserve several bytes so that variables don't appear at address/offset 0 (NULL)
+
+section .data
+_data_start_:
 
 ;;;;;;;;;;;;;;;;
 
@@ -89,8 +88,12 @@ section .text
 
     times (0x10000 - ($ - _text_start_)) db 0xCC ; int3
 
+section .rodata
+align 4, db 0
+_rodata_end_:
+
 section .data
 
-    times (0x10000 - ($ - _data_start_)) db 0xCC ; int3
+    times (0x10000 - (_rodata_end_ - _rodata_start_) - ($ - _data_start_)) db 0xCC ; int3
 
 ; file end: file offset = 0x20000

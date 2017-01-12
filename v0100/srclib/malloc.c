@@ -1,10 +1,17 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
-#ifdef _DOS
 #ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
 
+#ifdef _DOS
+
+#ifdef __HUGE_OR_UNREAL__
 static
 unsigned DosMemAlloc(unsigned paras)
 {
@@ -24,8 +31,12 @@ void* malloc(unsigned size)
 
   return (void*)(DosMemAlloc((size + 15) >> 4) << 4);
 }
+#endif // __HUGE_OR_UNREAL__
 
-#endif // __HUGE__
+#ifdef _DPMI
+#include "idpmi.h"
+#endif // _DPMI
+
 #endif // _DOS
 
 
@@ -80,7 +91,7 @@ void* __sbrk(int increment)
 #endif // _LINUX
 
 
-#ifndef __HUGE__
+#ifndef __HUGE_OR_UNREAL__
 #ifndef _WINDOWS
 
 #include "mm.h"
@@ -93,8 +104,13 @@ unsigned __heap_stop;
 static
 int init(void)
 {
+#ifndef _DPMI
   unsigned start = (unsigned)&_stop_alldata__;
   unsigned stop = (unsigned)&_start_stack__;
+#else
+  unsigned start = (unsigned)__dpmi_heap_start;
+  unsigned stop = (unsigned)__dpmi_heap_stop;
+#endif
   unsigned heapsz;
 
   //
@@ -133,15 +149,18 @@ int init(void)
   // The above is given for 16-bit versions of malloc()/realloc()/free in the tiny and small
   // memory models in DOS.
   //
-  // In 32-bit (s)brk-based version in Linux, the layout is the same, but the header/footer
+  // In 32-bit DPMI and (s)brk-based version in Linux, the layout is the same, but the header/footer
   // size is doubled. The alignment is doubled to 16 bytes as well.
   //
 
   start = ((start + HEADER_FOOTER_SZ - 1) & -HEADER_FOOTER_SZ) | HEADER_FOOTER_SZ; // start or next odd multiple of 4; if we add 4 to it, it will be a multiple of 8
   stop = ((stop - HEADER_FOOTER_SZ) & -HEADER_FOOTER_SZ) | HEADER_FOOTER_SZ; // stop or previous odd multiple of 4
 
-  if (start < (unsigned)&_stop_alldata__ ||
+  if (
+#ifndef _DPMI
+      start < (unsigned)&_stop_alldata__ ||
       stop > (unsigned)&_start_stack__ ||
+#endif
       start > stop ||
       stop - start < 2*HEADER_FOOTER_SZ)
     return -1;
@@ -282,7 +301,7 @@ void* malloc(unsigned size)
 }
 
 #endif // !_WINDOWS
-#endif // !__HUGE__
+#endif // !__HUGE_OR_UNREAL__
 
 #ifdef _WINDOWS
 

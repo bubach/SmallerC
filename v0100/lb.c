@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2013-2014, Alexey Frunze
+Copyright (c) 2013-2016, Alexey Frunze
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -21,10 +21,6 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
 ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
 */
 
 /*****************************************************************************/
@@ -69,6 +65,10 @@ either expressed or implied, of the FreeBSD Project.
 extern int main(int argc, char** argv);
 void exit(int);
 
+#ifdef __SMALLER_C_32__
+extern void __x87init(void);
+#endif
+
 #ifdef _RETROBSD
 void __start__(int argc, char** argv)
 {
@@ -78,6 +78,7 @@ void __start__(int argc, char** argv)
 #ifdef _LINUX
 void __start__(int argc, char** argv)
 {
+  __x87init();
   exit(main(argc, argv));
 }
 #else
@@ -88,6 +89,9 @@ void __start__(void)
   int argc;
   char** argv;
   __setargs__(&argc, &argv);
+#ifdef __SMALLER_C_32__
+  __x87init();
+#endif
   exit(main(argc, argv));
 }
 #endif
@@ -373,6 +377,22 @@ void* memset(void* s, int c, unsigned n)
 #endif
   return s;
 }
+
+#ifdef __SMALLER_C_32__
+int memcmp(void* s1, void* s2, unsigned n)
+{
+  if (n)
+  {
+    unsigned char *p1 = s1, *p2 = s2;
+    do
+    {
+      if (*p1++ != *p2++)
+        return (*--p1 - *--p2);
+    } while (--n);
+  }
+  return 0;
+}
+#endif
 
 int fputc(int c, FILE* stream);
 int putchar(int c);
@@ -748,6 +768,22 @@ int WriteFile(unsigned Handle,
       "push dword [ebp+8]\n"
       "call [__imp__WriteFile]");
 }
+
+extern unsigned (*_imp__SetFilePointer)(unsigned Handle,
+                                        int lDistanceToMove,
+                                        int* lpDistanceToMoveHigh,
+                                        unsigned dwMoveMethod);
+unsigned SetFilePointer(unsigned Handle,
+                        int lDistanceToMove,
+                        int* lpDistanceToMoveHigh,
+                        unsigned dwMoveMethod)
+{
+  asm("push dword [ebp+20]\n"
+      "push dword [ebp+16]\n"
+      "push dword [ebp+12]\n"
+      "push dword [ebp+8]\n"
+      "call [__imp__SetFilePointer]");
+}
 #endif // _WIN32
 
 #ifdef _RETROBSD
@@ -785,7 +821,7 @@ int OsCreateOrTruncate(char* name)
 #ifdef _LINUX
   asm("mov eax, 5\n" // sys_open
       "mov ebx, [ebp + 8]\n"
-      "mov ecx, 0x641\n" // truncate if exists, else create, writing only
+      "mov ecx, 0x241\n" // truncate if exists, else create, writing only
       "mov edx, 664o\n" // rw-rw-r--
       "int 0x80\n"
       "mov ebx, eax\n"
@@ -1053,6 +1089,67 @@ int OsWrite(int fd, void* p, unsigned s)
 #endif
 #endif
 }
+
+#ifndef __SMALLER_C_16__
+long OsLseek(int fd, long ofs, int whence)
+{
+#ifdef _RETROBSD
+  long pos;
+  asm volatile ("move $4, %1\n"
+                "move $5, %2\n"
+                "move $6, %3\n"
+                "syscall 19\n" // SYS_lseek
+                "nop\n"
+                "nop\n"
+                "move %0, $2\n"
+                : "=r" (pos)
+                : "r" (fd), "r" (ofs), "r" (whence)
+                : "$2", "$4", "$5", "$6");
+  return pos;
+#else
+#ifdef _LINUX
+  asm("mov eax, 19\n" // sys_lseek
+      "mov ebx, [ebp + 8]\n"
+      "mov ecx, [ebp + 12]\n"
+      "mov edx, [ebp + 16]\n"
+      "int 0x80");
+#else
+#ifdef _WIN32
+  return SetFilePointer(fd, ofs, 0, whence);
+#else
+  asm("mov ah, 0x42\n"
+      "mov bx, [bp + 8]\n"
+      "mov dx, [bp + 12]\n"
+      "mov cx, [bp + 12 + 2]\n"
+      "mov al, [bp + 16]\n"
+      "int 0x21");
+  asm("sbb ebx, ebx\n"
+      "and eax, 0xffff\n"
+      "shl edx, 16\n"
+      "or  eax, edx\n"
+      "or  eax, ebx");
+#endif
+#endif
+#endif
+}
+#else
+int OsLseek16(int fd, unsigned short ofs[2], int whence)
+{
+  asm("mov ah, 0x42\n"
+      "mov bx, [bp + 4]\n"
+      "mov si, [bp + 6]");
+  asm("mov dx, [si]\n"
+      "mov cx, [si + 2]\n"
+      "mov al, [bp + 8]\n"
+      "int 0x21");
+  asm("sbb bx, bx\n"
+      "or  ax, bx\n"
+      "or  dx, bx\n"
+      "mov [si], ax\n"
+      "mov [si + 2], dx\n"
+      "mov ax, bx");
+}
+#endif
 
 #ifdef _DOS
 unsigned DosGetPspSeg(void)
@@ -1397,3 +1494,261 @@ int fclose(FILE* stream)
   --__FileCnt__;
   return OsClose(fd);
 }
+
+struct fpos_t_
+{
+  union
+  {
+    unsigned short halves[2]; // for 16-bit memory models without 32-bit longs
+    int align; // for alignment on machine word boundary
+  } u;
+}; // keep in sync with stdio.h !!!
+#define fpos_t struct fpos_t_
+
+// Note, these fgetpos() and fsetpos() are implemented for write-only files
+
+int fgetpos(FILE* stream, fpos_t* pos)
+{
+  unsigned i = (unsigned)stream, fd;
+
+  fd = __FileHandles__[--i];
+
+#ifndef __SMALLER_C_16__
+{
+  long p;
+  if ((p = OsLseek(fd, 0, 1/*SEEK_CUR*/)) < 0)
+    return -1;
+
+  p += __FileBufPos__[i];
+  pos->u.align = p;
+}
+#else
+{
+  unsigned short p[2];
+  p[0] = p[1] = 0;
+  if (OsLseek16(fd, p, 1/*SEEK_CUR*/) < 0)
+    return -1;
+  p[1] += __FileBufPos__[i] > 0xFFFF - p[0];
+  p[0] += __FileBufPos__[i];
+  pos->u.halves[0] = p[0];
+  pos->u.halves[1] = p[1];
+}
+#endif
+  return 0;
+}
+
+int fsetpos(FILE* stream, fpos_t* pos)
+{
+  unsigned i = (unsigned)stream, fd;
+  unsigned sz;
+
+  fd = __FileHandles__[--i];
+
+  // flush
+  sz = __FileBufPos__[i];
+  if (sz)
+  {
+    if ((unsigned)OsWrite(fd, __FileBufs__[i], sz) != sz)
+      return -1;
+  }
+
+  // seek
+#ifndef __SMALLER_C_16__
+{
+  long p = pos->u.align;
+  if ((p = OsLseek(fd, p, 0/*SEEK_SET*/)) < 0)
+    return -1;
+}
+#else
+{
+  if (OsLseek16(fd, pos->u.halves, 0/*SEEK_SET*/) < 0)
+    return -1;
+}
+#endif
+
+  __FileBufDirty__[i] = 0;
+  __FileBufSize__[i] = __FileBufPos__[i] = 0;
+
+  return 0;
+}
+
+#ifdef __SMALLER_C_32__
+#ifndef _RETROBSD
+
+#ifdef __HUGE__
+#define xbp "bp"
+#define xsp "sp"
+#else
+#define xbp "ebp"
+#define xsp "esp"
+#endif
+
+void __x87init(void)
+{
+  // Mask all exceptions, set rounding to nearest even and precision to 64 bits.
+  // TBD??? Actually check for x87???
+  asm("fninit");
+}
+
+float __floatsisf(int i)
+{
+  asm
+  (
+  "fild dword ["xbp"+8]\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+float __floatunsisf(unsigned i)
+{
+  asm
+  (
+  "push dword 0\n"
+  "push dword ["xbp"+8]\n"
+  "fild qword ["xbp"-8]\n" // load 32-bit unsigned int as 64-bit signed int
+  "add  "xsp", 8\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+int __fixsfsi(float f)
+{
+  asm
+  (
+  "sub    "xsp", 4\n"
+  "fnstcw ["xbp"-2]\n" // save rounding
+  "mov    ax, ["xbp"-2]\n"
+  "mov    ah, 0x0c\n" // rounding towards 0 (AKA truncate) since we don't have fisttp
+  "mov    ["xbp"-4], ax\n"
+  "fld    dword ["xbp"+8]\n"
+  "fldcw  ["xbp"-4]\n" // rounding = truncation
+  "fistp  dword ["xbp"+8]\n"
+  "fldcw  ["xbp"-2]\n" // restore rounding
+  "add    "xsp", 4\n"
+  "mov    eax, ["xbp"+8]"
+  );
+}
+
+unsigned __fixunssfsi(float f)
+{
+  asm
+  (
+  "sub    "xsp", 12\n"
+  "fnstcw ["xbp"-2]\n" // save rounding
+  "mov    ax, ["xbp"-2]\n"
+  "mov    ah, 0x0c\n" // rounding towards 0 (AKA truncate) since we don't have fisttp
+  "mov    ["xbp"-4], ax\n"
+  "fld    dword ["xbp"+8]\n"
+  "fldcw  ["xbp"-4]\n" // rounding = truncation
+  "fistp  qword ["xbp"-12]\n" // store 64-bit signed int
+  "fldcw  ["xbp"-2]\n" // restore rounding
+  "mov    eax, ["xbp"-12]\n" // take low 32 bits
+  "add    "xsp", 12"
+  );
+}
+
+float __addsf3(float a, float b)
+{
+  asm
+  (
+  "fld  dword ["xbp"+8]\n"
+  "fadd dword ["xbp"+12]\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+float __subsf3(float a, float b)
+{
+  asm
+  (
+  "fld  dword ["xbp"+8]\n"
+  "fsub dword ["xbp"+12]\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+float __negsf2(float f)
+{
+  asm
+  (
+  "mov eax, ["xbp"+8]\n"
+  "xor eax, 0x80000000"
+  );
+}
+
+float __mulsf3(float a, float b)
+{
+  asm
+  (
+  "fld  dword ["xbp"+8]\n"
+  "fmul dword ["xbp"+12]\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+float __divsf3(float a, float b)
+{
+  asm
+  (
+  "fld  dword ["xbp"+8]\n"
+  "fdiv dword ["xbp"+12]\n"
+  "fstp dword ["xbp"+8]\n"
+  "mov  eax, ["xbp"+8]"
+  );
+}
+
+float __lesf2(float a, float b)
+{
+  asm
+  (
+  "fld      dword ["xbp"+12]\n"
+  "fld      dword ["xbp"+8]\n"
+  "fucompp\n"
+  "fstsw    ax\n" // must use these moves since we don't have fucomip
+  "sahf\n"
+  "jnp      .ordered\n"
+  "mov      eax, +1\n" // return +1 if either a or b (or both) is a NaN
+  "jmp      .done\n"
+  ".ordered:\n"
+  "jnz      .unequal\n"
+  "xor      eax, eax\n" // return 0 if a == b
+  "jmp      .done\n"
+  ".unequal:\n"
+  "sbb      eax, eax\n"
+  "jc       .done\n"    // return -1 if a < b
+  "inc      eax\n"      // return +1 if a > b
+  ".done:"
+  );
+}
+
+float __gesf2(float a, float b)
+{
+  asm
+  (
+  "fld      dword ["xbp"+12]\n"
+  "fld      dword ["xbp"+8]\n"
+  "fucompp\n"
+  "fstsw    ax\n" // must use these moves since we don't have fucomip
+  "sahf\n"
+  "jnp      .ordered\n"
+  "mov      eax, -1\n" // return -1 if either a or b (or both) is a NaN
+  "jmp      .done\n"
+  ".ordered:\n"
+  "jnz      .unequal\n"
+  "xor      eax, eax\n" // return 0 if a == b
+  "jmp      .done\n"
+  ".unequal:\n"
+  "sbb      eax, eax\n"
+  "jc       .done\n"    // return -1 if a < b
+  "inc      eax\n"      // return +1 if a > b
+  ".done:"
+  );
+}
+
+#endif
+#endif

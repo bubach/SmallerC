@@ -1,16 +1,16 @@
 ; /*
-; Copyright (c) 2014, Alexey Frunze
+; Copyright (c) 2014-2017, Alexey Frunze
 ; All rights reserved.
-; 
+;
 ; Redistribution and use in source and binary forms, with or without
-; modification, are permitted provided that the following conditions are met: 
-; 
+; modification, are permitted provided that the following conditions are met:
+;
 ; 1. Redistributions of source code must retain the above copyright notice, this
-;    list of conditions and the following disclaimer. 
+;    list of conditions and the following disclaimer.
 ; 2. Redistributions in binary form must reproduce the above copyright notice,
 ;    this list of conditions and the following disclaimer in the documentation
-;    and/or other materials provided with the distribution. 
-; 
+;    and/or other materials provided with the distribution.
+;
 ; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 ; ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 ; WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -21,12 +21,8 @@
 ; ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 ; (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-; 
-; The views and conclusions contained in the software and documentation are those
-; of the authors and should not be interpreted as representing official policies, 
-; either expressed or implied, of the FreeBSD Project.
 ; */
-; 
+;
 ; /*****************************************************************************/
 ; /*                                                                           */
 ; /*                             minimal stdlibc                               */
@@ -34,10 +30,10 @@
 ; /*Just enough code for Smaller C to compile itself into a 32-bit Windows EXE.*/
 ; /*                                                                           */
 ; /*****************************************************************************/
-; 
+;
 ; Compile:
-;   smlrc -seg32 -no-externs -D _WIN32 lb.c lb.asm
-;   smlrc -seg32 -no-externs -label 1001 smlrc.c smlrc.asm
+;   smlrc -nobss -seg32 -no-externs -D _WIN32 lb.c lb.asm
+;   smlrc -nobss -seg32 -no-externs -label 1001 smlrc.c smlrc.asm
 ;   nasm -f bin mzstub.asm -o mzstub.bin
 ;   nasm -f bin smlrcw.asm -o smlrcw.exe
 ;
@@ -47,7 +43,7 @@ FileAlignment     equ 512
 SectionAlignment  equ 4096
 
 _text_size_      equ (_text_end_ - _text_start_)
-_data_size_      equ (_data_end_ - _data_start_)
+_data_size_      equ ((_rodata_end_ - _rodata_start_) + (_data_end_ - _data_start_))
 ImageSize        equ (HeadersSize + GapSize + _text_size_ + _data_size_)
 
 bits 32
@@ -74,8 +70,8 @@ OptionalHeader:
     dd _data_size_                  ; SizeOfInitializedData
     dd 0                            ; SizeOfUninitializedData
     dd Entry - ImageBase            ; AddressOfEntryPoint
-    dd _text_start_                 ; BaseOfCode
-    dd _data_start_                 ; BaseOfData
+    dd _text_start_ - ImageBase     ; BaseOfCode
+    dd _rodata_start_ - ImageBase   ; BaseOfData
     dd ImageBase                    ; ImageBase
     dd SectionAlignment             ; SectionAlignment
     dd FileAlignment                ; FileAlignment
@@ -131,9 +127,9 @@ SectionDescriptors:
 
     db ".data", 0, 0, 0         ; Name
     dd _data_size_              ; VirtualSize
-    dd _data_start_ - ImageBase ; VirtualAddress
+    dd _rodata_start_ - ImageBase ; VirtualAddress
     dd _data_size_              ; SizeOfRawData
-    dd _data_start_ - ImageBase ; PointerToRawData
+    dd _rodata_start_ - ImageBase ; PointerToRawData
     dd 0                        ; PointerToRelocations
     dd 0                        ; PointerToLinenumbers
     dw 0                        ; NumberOfRelocations
@@ -151,6 +147,10 @@ _text_start_:
 Entry:
     jmp ___start__ ; __start__() will set up argc and argv for main() and call exit(main(argc, argv))
 
+section .rodata
+align SectionAlignment, db 0
+_rodata_start_:
+
 section .data
 align SectionAlignment, db 0
 _data_start_:
@@ -167,6 +167,7 @@ Kernel32Hints:
                         dd hint_CloseHandle - ImageBase
                         dd hint_ReadFile - ImageBase
                         dd hint_WriteFile - ImageBase
+                        dd hint_SetFilePointer - ImageBase
                         dd 0
 
 Kernel32IatStart:
@@ -177,6 +178,7 @@ __imp__CreateFileA      dd hint_CreateFileA - ImageBase
 __imp__CloseHandle      dd hint_CloseHandle - ImageBase
 __imp__ReadFile         dd hint_ReadFile - ImageBase
 __imp__WriteFile        dd hint_WriteFile - ImageBase
+__imp__SetFilePointer   dd hint_SetFilePointer - ImageBase
                         dd 0
 
 hint_ExitProcess        db 0, 0, "ExitProcess", 0
@@ -186,6 +188,7 @@ hint_CreateFileA        db 0, 0, "CreateFileA", 0
 hint_CloseHandle        db 0, 0, "CloseHandle", 0
 hint_ReadFile           db 0, 0, "ReadFile", 0
 hint_WriteFile          db 0, 0, "WriteFile", 0
+hint_SetFilePointer     db 0, 0, "SetFilePointer", 0
 
 Kernel32name            db "kernel32.dll", 0
 
@@ -201,6 +204,10 @@ align 4, db 0
 section .text
 align SectionAlignment, db 0
 _text_end_:
+
+section .rodata
+align SectionAlignment, db 0
+_rodata_end_:
 
 section .data
 align SectionAlignment, db 0

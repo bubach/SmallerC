@@ -1,10 +1,17 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosDelete(char* name, unsigned* error)
 {
@@ -18,13 +25,19 @@ int DosDelete(char* name, unsigned* error)
       "cmc\n"
       "sbb ax, ax\n"
       "and eax, 1\n"
-      "mov esi, [bp + 12]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("push word 0\n"
+      "pop  ds\n"
+      "mov  [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -41,6 +54,34 @@ int DosDelete(char* name, unsigned* error)
       "mov [si], bx");
 }
 #endif // __SMALLER_C_16__
+
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+static
+int DosDelete(char* name, unsigned* error)
+{
+  __dpmi_int_regs regs;
+  unsigned nlen = strlen(name) + 1;
+  if (nlen > __DPMI_IOFBUFSZ)
+  {
+    *error = -1;
+    return 0;
+  }
+  memcpy(__dpmi_iobuf, name, nlen);
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x4100;
+  regs.edx = (unsigned)__dpmi_iobuf & 0xF;
+  regs.ds = (unsigned)__dpmi_iobuf >> 4;
+  if (__dpmi_int(0x21, &regs))
+  {
+    *error = -1;
+    return 0;
+  }
+  *error = regs.eax & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+#endif // _DPMI
 
 int unlink(char* name)
 {

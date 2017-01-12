@@ -1,14 +1,21 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include "istdio.h"
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosQueryAttr(char* name, unsigned* attrOrError)
 {
@@ -27,13 +34,19 @@ int DosQueryAttr(char* name, unsigned* attrOrError)
       "and bx, dx\n"
       "or  bx, cx");
   asm("and eax, 1\n"
-      "mov esi, [bp + 12]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 12]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("push word 0\n"
+      "pop  ds\n"
+      "mov  [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -56,6 +69,34 @@ int DosQueryAttr(char* name, unsigned* attrOrError)
 }
 #endif // __SMALLER_C_16__
 
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+static
+int DosQueryAttr(char* name, unsigned* attrOrError)
+{
+  __dpmi_int_regs regs;
+  unsigned nlen = strlen(name) + 1;
+  if (nlen > __DPMI_IOFBUFSZ)
+  {
+    *attrOrError = -1;
+    return 0;
+  }
+  memcpy(__dpmi_iobuf, name, nlen);
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x4300;
+  regs.edx = (unsigned)__dpmi_iobuf & 0xF;
+  regs.ds = (unsigned)__dpmi_iobuf >> 4;
+  if (__dpmi_int(0x21, &regs))
+  {
+    *attrOrError = -1;
+    return 0;
+  }
+  *attrOrError = ((regs.flags & 1) ? regs.eax : regs.ecx) & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+#endif // _DPMI
+
 #endif // _DOS
 
 #ifdef _WINDOWS
@@ -74,13 +115,32 @@ static
 void TryPath(char* path)
 {
   unsigned attrOrError;
+  int trailingSlash = 0;
 
   if ((plen = strlen(path)) >= L_tmpnam - (1/*slash*/ + 8+1+3/*8.3 name*/))
     return;
 
   strcpy(name, path);
-  if (name[plen - 1] != '\\' && name[plen - 1] != '/' && name[plen - 1] != ':')
-    strcat(name, "\\"), plen++;
+
+  if (name[plen - 1] == '\\' || name[plen - 1] == '/')
+    trailingSlash = name[plen - 1];
+  // The name of the directory whose existence/attribute we're about to check
+  // should end with a slash IFF it's a root directory. Valid: C:\, C:\FOO.
+  // Invalid: C:, C:\FOO\.
+  if (trailingSlash)
+  {
+    if (plen > 1 && name[plen - 2] != ':')
+      name[--plen] = '\0';
+    else
+      trailingSlash = 0;
+  }
+  else
+  {
+    if (name[plen - 1] == ':')
+      strcat(name, "\\"), plen++;
+    else
+      trailingSlash = '\\';
+  }
 
   // Check if name exists in the file system and is a directory
 #ifdef _DOS
@@ -92,6 +152,13 @@ void TryPath(char* path)
   if (attrOrError == INVALID_FILE_ATTRIBUTES || !(attrOrError & FILE_ATTRIBUTE_DIRECTORY))
     *name = '\0';
 #endif
+
+  // If it's a directory, append a slash if needed, so a file name can be appended after it
+  if (*name && trailingSlash)
+  {
+    name[plen++] = trailingSlash;
+    name[plen] = '\0';
+  }
 }
 
 static

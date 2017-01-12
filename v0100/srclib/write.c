@@ -1,12 +1,19 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
 #include <unistd.h>
 
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosWrite(int handle, void* buf, unsigned size, unsigned* sizeOrError)
 {
@@ -22,13 +29,19 @@ int DosWrite(int handle, void* buf, unsigned size, unsigned* sizeOrError)
       "cmc\n"
       "sbb ax, ax\n"
       "and eax, 1\n"
-      "mov esi, [bp + 20]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 20]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("push word 0\n"
+      "pop  ds\n"
+      "mov  [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -48,6 +61,30 @@ int DosWrite(int handle, void* buf, unsigned size, unsigned* sizeOrError)
 }
 #endif // __SMALLER_C_16__
 
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+static
+int DosWrite(int handle, void* buf, unsigned size, unsigned* sizeOrError)
+{
+  __dpmi_int_regs regs;
+  memcpy(__dpmi_iobuf, buf, size);
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x4000;
+  regs.ebx = handle;
+  regs.ecx = size;
+  regs.edx = (unsigned)__dpmi_iobuf & 0xF;
+  regs.ds = (unsigned)__dpmi_iobuf >> 4;
+  if (__dpmi_int(0x21, &regs))
+  {
+    *sizeOrError = -1;
+    return 0;
+  }
+  *sizeOrError = regs.eax & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+#endif // _DPMI
+
 ssize_t write(int fd, void* buf, size_t size)
 {
   ssize_t cnt = 0;
@@ -60,9 +97,7 @@ ssize_t write(int fd, void* buf, size_t size)
 
   while (size)
   {
-#ifndef __HUGE__
-    unsigned sz = size;
-#else
+#ifdef __HUGE_OR_UNREAL__
     // DOS can read/write at most 65535 bytes at a time.
     // An arbitrary 20-bit physical address can be transformed
     // into a segment:offset pair such that offset is always <= 15
@@ -72,6 +107,15 @@ ssize_t write(int fd, void* buf, size_t size)
     // the range from this offset (at most 15(0xF)) to 65535(0xFFFF)
     // within a segment. So, cap the size at 0xFFF0.
     unsigned sz = (size > 0xFFF0) ? 0xFFF0 : size;
+#endif
+#ifdef _DPMI
+    // Similarly to huge, the DPMI I/O buffer size is also smaller than 64KB.
+    unsigned sz = (size > __DPMI_IOFBUFSZ) ? __DPMI_IOFBUFSZ : size;
+#endif
+#ifndef __HUGE_OR_UNREAL__
+#ifndef _DPMI
+    unsigned sz = size;
+#endif
 #endif
     unsigned writtenOrError;
     if (DosWrite(fd, p, sz, &writtenOrError))

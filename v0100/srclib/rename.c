@@ -1,10 +1,17 @@
 /*
-  Copyright (c) 2014, Alexey Frunze
+  Copyright (c) 2014-2016, Alexey Frunze
   2-clause BSD license.
 */
+#ifdef __HUGE__
+#define __HUGE_OR_UNREAL__
+#endif
+#ifdef __UNREAL__
+#define __HUGE_OR_UNREAL__
+#endif
+
 #ifdef _DOS
 
-#ifdef __HUGE__
+#ifdef __HUGE_OR_UNREAL__
 static
 int DosRename(char* old, char* new, unsigned* error)
 {
@@ -22,13 +29,20 @@ int DosRename(char* old, char* new, unsigned* error)
       "cmc\n"
       "sbb ax, ax\n"
       "and eax, 1\n"
-      "mov esi, [bp + 16]\n"
-      "ror esi, 4\n"
+      "mov esi, [bp + 16]");
+#ifdef __HUGE__
+  asm("ror esi, 4\n"
       "mov ds, si\n"
       "shr esi, 28\n"
       "mov [si], ebx");
+#else
+  asm("push dword 0\n"
+      "pop  es\n"
+      "pop  ds\n"
+      "mov  [esi], ebx");
+#endif
 }
-#endif // __HUGE__
+#endif // __HUGE_OR_UNREAL__
 
 #ifdef __SMALLER_C_16__
 static
@@ -46,6 +60,39 @@ int DosRename(char* old, char* new, unsigned* error)
       "mov [si], bx");
 }
 #endif // __SMALLER_C_16__
+
+#ifdef _DPMI
+#include <string.h>
+#include "idpmi.h"
+static
+int DosRename(char* old, char* new, unsigned* error)
+{
+  __dpmi_int_regs regs;
+  unsigned lold = strlen(old) + 1;
+  unsigned lnew = strlen(new) + 1;
+  char* pnew = __dpmi_iobuf;
+  if (lold > __DPMI_IOFBUFSZ || lnew > __DPMI_IOFBUFSZ - lold)
+  {
+    *error = -1;
+    return 0;
+  }
+  memcpy(__dpmi_iobuf, old, lold);
+  memcpy(pnew += lold, new, lnew);
+  memset(&regs, 0, sizeof regs);
+  regs.eax = 0x5600;
+  regs.edx = (unsigned)__dpmi_iobuf & 0xF;
+  regs.ds = (unsigned)__dpmi_iobuf >> 4;
+  regs.edi = (unsigned)pnew & 0xF;
+  regs.es = (unsigned)pnew >> 4;
+  if (__dpmi_int(0x21, &regs))
+  {
+    *error = -1;
+    return 0;
+  }
+  *error = regs.eax & 0xFFFF;
+  return (regs.flags & 1) ^ 1; // carry
+}
+#endif // _DPMI
 
 int rename(char* old, char* new)
 {
@@ -81,4 +128,3 @@ int rename(char* old, char* new)
 }
 
 #endif // _LINUX
-
